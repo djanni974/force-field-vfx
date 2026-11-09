@@ -60,6 +60,7 @@ canvas{display:block}
   <label>Teinte bouclier <span id="vHue">220</span><input id="hue" type="range" min="0" max="360" step="1" value="220"></label>
   <label class="row"><input id="auto" type="checkbox" checked> Tir automatique</label>
   <label class="row"><input id="shield" type="checkbox" checked> Bouclier actif</label>
+  <label class="row"><input id="phys" type="checkbox"> Physique réelle <span style="opacity:.6">(plasma sur le bouclier)</span></label>
   <label class="row"><input id="snd" type="checkbox" checked> Son <span id="sndHint" style="opacity:.6">(clique dans la scène)</span></label>
   <label>Volume <span id="vVol">80</span> %<input id="vol" type="range" min="0" max="100" step="1" value="80"></label>
   <div id="credits">D'après la <a href="https://lejrimostfa.github.io/force-field-vfx-threejs/" target="_blank" rel="noopener">démo de lejrimostfa</a> · sons <a href="https://elevenlabs.io" target="_blank" rel="noopener">ElevenLabs</a> · <a href="https://www.djannistudio.fr" target="_blank" rel="noopener">djannistudio.fr</a></div>
@@ -74,7 +75,8 @@ import {
   mix, min, max, abs, exp, pow, sin, cos, atan, asin, floor, fract, mod, dot, cross, normalize, select,
   texture, texture3D, textureStore, storageTexture, struct, atomicMax, atomicStore, int, instanceIndex, instancedArray, instancedDynamicBufferAttribute,
   mx_noise_vec3, positionGeometry, positionLocal, positionWorld, normalWorld, cameraPosition, cameraProjectionMatrix, cameraViewMatrix,
-  uv, screenUV, screenCoordinate, pass, mx_noise_float, mx_fractal_noise_float, hash, interleavedGradientNoise, frameId
+  uv, screenUV, screenCoordinate, pass, mx_noise_float, mx_fractal_noise_float, hash, interleavedGradientNoise, frameId,
+  clamp, length, sqrt, log2, uint, uvec2, wgslFn, Discard
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -93,7 +95,7 @@ if (!QUAL[qKey]) qKey = 'high';
 const Q = QUAL[qKey];
 
 // ---------- params / UI ----------
-const P = { snd:true, vol:0.8, power:1, spread:0.12, hue:220, auto:true, shield:true, visc:0.02, gas:'propane', windS:0, windDir:90, rain:false };
+const P = { phys:new URLSearchParams(location.search).has('phys'), snd:true, vol:0.8, power:1, spread:0.12, hue:220, auto:true, shield:true, visc:0.02, gas:'propane', windS:0, windDir:90, rain:false };
 const $ = id => document.getElementById(id);
 const bind = (id, key, out, fmt=v=>v) => $(id).addEventListener('input', e => { P[key] = parseFloat(e.target.value); $(out).textContent = fmt(P[key]); });
 bind('pow','power','vPow', v=>v.toFixed(2));
@@ -105,6 +107,7 @@ bind('wdir','windDir','vWdir', v=>v.toFixed(0));
 $('gas').addEventListener('change', e => { P.gas = e.target.value; e.target.blur(); });
 $('rain').addEventListener('change', e => P.rain = e.target.checked);
 $('qual').value = qKey;
+$('phys').checked = P.phys; $('phys').addEventListener('change', e => { P.phys = e.target.checked; e.target.blur(); });
 $('qual').addEventListener('change', e => { const v = e.target.value; try { localStorage.setItem('ffvfx-q', v); } catch (er) {} const u = new URL(location.href); u.searchParams.set('q', v); location.href = u.href; });
 $('snd').addEventListener('change', e => { P.snd = e.target.checked; audioInit(); e.target.blur(); });
 $('vol').addEventListener('input', e => { P.vol = e.target.value/100; $('vVol').textContent = e.target.value; });
@@ -121,6 +124,93 @@ $('shield').addEventListener('change', e => P.shield = e.target.checked);
 const ss = (a, b, x) => { const A = float(a), B = float(b); const t = float(x).sub(A).div(B.sub(A)).clamp(0, 1); return t.mul(t).mul(t.mul(-2).add(3)); };
 const h21 = (p) => fract(sin(dot(p, vec2(12.9898, 78.233))).mul(43758.5453));
 const uTime = uniform(0);
+
+// ---------- air réel : thermochimie à l'équilibre, colorimétrie CIE, corps noir (repris de l'artefact « Jet de plasma ») ----------
+const TH = (() => {
+  const RU = 8.314462618, NAV = 6.02214076e23, KB = 1.380649e-23;
+  const C = { WN: 0.7671, WO: 0.2329, MN: 0.0280134, MO: 0.0319988, TVN: 3393.5, TVO: 2273.6, TDN: 113250, TDO: 59380,
+    RDN: 1.3e5, RDO: 1.5e5, TIN: 168670, TIO: 158040, GN: 4.5, GO: 0.889, CSAHA: 2.4147e21 };
+  const { WN, WO, MN, MO, TVN, TVO, TDN, TDO, RDN, RDO, TIN, TIO, GN, GO, CSAHA } = C;
+  const dis = (K) => 2*Math.sqrt(K)/(Math.sqrt(K) + Math.sqrt(K + 4));
+  // vibration de N2 et O2, dissociation (gaz de Lighthill), ionisation des atomes (Saha)
+  function thermo(rho, T){
+    const iT = 1/T;
+    const aN = dis(RDN/(WN*rho)*Math.exp(-TDN*iT)), aO = dis(RDO/(WO*rho)*Math.exp(-TDO*iT));
+    const mN2 = WN*(1 - aN)/MN, mO2 = WO*(1 - aO)/MO, mNa = 2*WN*aN/MN, mOa = 2*WO*aO/MO, mA = mNa + mOa;
+    const na = mA*rho*NAV + 1e-30;
+    const Sa = CSAHA*T*Math.sqrt(T)*(mNa*GN*Math.exp(-TIN*iT) + mOa*GO*Math.exp(-TIO*iT))/(mA + 1e-30);
+    const x = 2*Math.sqrt(Sa)/(Math.sqrt(Sa) + Math.sqrt(Sa + 4*na)), mE = mA*x;
+    const yN = TVN*iT, yO = TVO*iT, eN = Math.exp(-yN), eO = Math.exp(-yO);
+    const e = RU*(mN2*(2.5*T + TVN*eN/(1 - eN)) + mO2*(2.5*T + TVO*eO/(1 - eO)) + (mA + mE)*1.5*T + 0.5*mNa*TDN + 0.5*mOa*TDO + x*(mNa*TIN + mOa*TIO));
+    const Rp = RU*(mN2 + mO2 + mA + mE);
+    const cvf = RU*(mN2*(2.5 + yN*yN*eN/((1 - eN)*(1 - eN))) + mO2*(2.5 + yO*yO*eO/((1 - eO)*(1 - eO))) + (mA + mE)*1.5);
+    return { e, Rp, gam: 1 + Rp/cvf, x, mN2, mNa, mOa, ne: mE*rho*NAV };
+  }
+  function TofE(rho, e, lo = 10){
+    if (thermo(rho, lo).e >= e) return lo;
+    let a = Math.log(lo), b = Math.log(90000);
+    for (let k = 0; k < 34; k++){ const m = 0.5*(a + b); if (thermo(rho, Math.exp(m)).e < e) a = m; else b = m; }
+    return Math.exp(0.5*(a + b));
+  }
+  // fonctions colorimétriques CIE 1931 (Wyman, Sloan & Shirley 2013) vers sRGB linéaire
+  const g = (l, m, s1, s2) => { const t = (l - m)/(l < m ? s1 : s2); return Math.exp(-0.5*t*t); };
+  function cmf(l){
+    const X = 1.056*g(l, 599.8, 37.9, 31.0) + 0.362*g(l, 442.0, 16.0, 26.7) - 0.065*g(l, 501.1, 20.4, 26.2);
+    const Y = 0.821*g(l, 568.8, 46.9, 40.5) + 0.286*g(l, 530.9, 16.3, 31.1);
+    const Z = 1.217*g(l, 437.0, 11.8, 36.0) + 0.681*g(l, 459.0, 26.0, 13.8);
+    const k = 1/106.86;
+    return [(3.2406*X - 1.5372*Y - 0.4986*Z)*k, (-0.9689*X + 1.8758*Y + 0.0415*Z)*k, (0.0557*X - 0.2040*Y + 1.0570*Z)*k];
+  }
+  const mixc = (lines) => lines.reduce((a, [l, w]) => { const c = cmf(l); return [a[0] + w*c[0], a[1] + w*c[1], a[2] + w*c[2]]; }, [0, 0, 0]);
+  // bandes de N2, N2+ et raies de N et O (raies représentatives, poids = part de la puissance du système)
+  const BAND = {
+    n2fp: mixc([[590, 0.10], [625, 0.12], [660, 0.13], [750, 0.30], [870, 0.25], [1050, 0.10]]),
+    n2sp: mixc([[316, 0.07], [337, 0.45], [357, 0.25], [380, 0.15], [405, 0.08]]),
+    n2pfn: mixc([[391.4, 0.65], [427.8, 0.27], [470.9, 0.08]]),
+    atom: mixc([[746, 0.15], [821, 0.17], [868, 0.15], [493, 0.03], [777, 0.30], [845, 0.15], [616, 0.025], [645, 0.025]]),
+    cont: (() => { let a = [0, 0, 0]; for (let l = 380; l < 780; l += 2){ const c = cmf(l); a = a.map((v, i) => v + c[i]/200); } return a; })(),
+  };
+  function emission(rho, T){
+    const th = thermo(rho, T);
+    const nN2 = th.mN2*rho*NAV, nN = th.mNa*rho*NAV*(1 - th.x), nO = th.mOa*rho*NAV*(1 - th.x), ne = th.ne;
+    const n2fp = nN2*1.95e-14*Math.exp(-85300/T), n2sp = nN2*7.5e-12*Math.exp(-128000/T);
+    const Sm = 4*CSAHA*T*Math.sqrt(T)*Math.exp(-180800/T);
+    const n2pfn = Math.min(nN2*Sm/Math.max(ne, 1e12), ne)*6.5e-13*Math.exp(-36800/T);
+    const atom = nN*1.9e-12*Math.exp(-137000/T) + nO*1.3e-12*Math.exp(-124000/T);
+    const cont = 8*1.42e-40*ne*ne*16250*Math.exp(-27800/T)/(12.57*Math.sqrt(T));
+    return { rgb: [0, 1, 2].map((i) => n2fp*BAND.n2fp[i] + n2sp*BAND.n2sp[i] + n2pfn*BAND.n2pfn[i] + atom*BAND.atom[i] + cont*BAND.cont[i]), ne };
+  }
+  function blackbody(T){
+    let a = [0, 0, 0];
+    for (let l = 360; l <= 830; l += 5){
+      const lm = l*1e-9, B = 2*6.62607015e-34*8.98755179e16/lm**5/(Math.exp(6.62607015e-34*2.99792458e8/(lm*KB*T)) - 1)*1e-9;
+      const c = cmf(l); a = a.map((v, i) => v + B*c[i]*5);
+    }
+    return a;
+  }
+  return { RU, NAV, C, thermo, TofE, BAND, emission, blackbody };
+})();
+// luminance d'un corps noir de 500 à 3 000 K (émissivité 0,85), normalisée pour qu'une paroi à 1 800 K vaille ~1,6
+const BB = { T0: 500, T1: 3000, N: 128 };
+const bbNorm = 1.6/Math.max(...TH.blackbody(1800));
+const bbTex = (() => {
+  const d = new Uint16Array(BB.N*4), h = THREE.DataUtils.toHalfFloat;
+  for (let k = 0; k < BB.N; k++){ const c = TH.blackbody(BB.T0 + (BB.T1 - BB.T0)*k/(BB.N - 1)); for (let i = 0; i < 3; i++) d[k*4 + i] = h(Math.min(Math.max(c[i], 0)*0.85*bbNorm, 60000)); d[k*4 + 3] = h(1); }
+  const t = new THREE.DataTexture(d, BB.N, 1, THREE.RGBAFormat, THREE.HalfFloatType);
+  t.magFilter = t.minFilter = THREE.LinearFilter; t.generateMipmaps = false; t.needsUpdate = true; return t;
+})();
+const uBBExpo = uniform(1), uShDim = uniform(1);
+// bruit d'écoulement 2D (casse la symétrie parfaite du calcul axisymétrique au rendu)
+const flowTex = (() => {
+  const lat = (n, seed) => { let s = seed; const g = new Float32Array(n*n); for (let i = 0; i < n*n; i++){ s = (s*16807) % 2147483647; g[i] = (s - 1)/2147483646; } return g; };
+  const vnz = (g, n, x, y) => { const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf*xf*(3 - 2*xf), v = yf*yf*(3 - 2*yf);
+    const x0 = ((xi % n) + n) % n, y0 = ((yi % n) + n) % n, x1 = (x0 + 1) % n, y1 = (y0 + 1) % n;
+    const a = g[y0*n + x0], b = g[y0*n + x1], c = g[y1*n + x0], d = g[y1*n + x1]; return a + (b - a)*u + (c - a)*v + (a - b - c + d)*u*v; };
+  const fbm = (g, n, x, y, oct) => { let s = 0, a = 0.5, f = 1, nm = 0; for (let o = 0; o < oct; o++){ s += a*vnz(g, n, x*f, y*f); nm += a; a *= 0.5; f *= 2; } return s/nm; };
+  const N = 128, data = new Uint8Array(N*N*4), g1 = lat(16, 77), g2 = lat(16, 991);
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++){ const fx = x/N*16, fy = y/N*16, k = (y*N + x)*4; data[k] = fbm(g1, 16, fx, fy, 3)*255; data[k+1] = fbm(g2, 16, fx, fy, 3)*255; data[k+3] = 255; }
+  const t = new THREE.DataTexture(data, N, N, THREE.RGBAFormat); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true; t.needsUpdate = true; return t;
+})();
 
 // ---------- renderer / scene ----------
 const renderer = new THREE.WebGPURenderer({ antialias:false });
@@ -291,9 +381,11 @@ shieldMat.colorNode = Fn(() => {
   const crack = ss(0.82, 0.95, crackN).mul(ss(0.8, 0.3, sI));                          // fissures appear as integrity drops
   const open = ss(0.12, 0.2, sI);                                                       // 0 inside a hole
   const rim = ss(0.32, 0.18, sI).mul(ss(0.06, 0.14, sI));                               // molten edge around holes
-  const glowH = mix(vec3(1.2, 0.18, 0.03), vec3(2.4, 1.3, 0.45), ss(1.0, 2.4, sH)).mul(ss(0.6, 1.8, sH));
-  const dmgCol = glowH.mul(0.45).add(vec3(2.4, 0.9, 0.25).mul(crack).mul(sH.mul(0.6).add(0.4))).add(vec3(3.0, 1.5, 0.5).mul(rim));
-  return dmgCol.mul(uShieldOnV).add(uShieldColor.mul(al).mul(open).add(hotCol.mul(hot).mul(0.45).mul(uShieldOnV)).add(vec3(1).mul(cell).mul(0.25).mul(uShieldOnV)).mul(open));
+  // incandescence de la paroi : couleur et luminance d'un corps noir (chaleur 1 = 1 900 K, seuil de rupture)
+  const Tw = sH.mul(1600).add(300);
+  const glowH = texture(bbTex, vec2(Tw.sub(BB.T0).div(BB.T1 - BB.T0), 0.5)).level(0).rgb.mul(ss(BB.T0, BB.T0 + 150, Tw)).mul(uBBExpo);
+  const dmgCol = glowH.mul(0.6).add(vec3(2.4, 0.9, 0.25).mul(crack).mul(sH.mul(0.6).add(0.4))).add(vec3(3.0, 1.5, 0.5).mul(rim));
+  return dmgCol.mul(uShieldOnV).add(uShieldColor.mul(al).mul(open).add(hotCol.mul(hot).mul(0.45).mul(uShieldOnV)).add(vec3(1).mul(cell).mul(0.25).mul(uShieldOnV)).mul(open).mul(uShDim));
 })();
 const shield = new THREE.Mesh(new THREE.SphereGeometry(SR, 96, 64), shieldMat);
 shield.position.copy(SC); shield.renderOrder = 1; scene.add(shield);
@@ -1017,6 +1109,344 @@ addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'Space') s
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; spaceDown = false; });
 
 
+// =====================================================================
+// RENTRÉE RÉELLE : écoulement compressible calculé (repris de l'artefact « Jet de plasma »)
+// Le jet de plasma vise le bouclier : on calcule l'écoulement autour de l'axe tireur -> centre du bouclier,
+// sur une grille 2D axisymétrique (z le long de l'axe, r la distance à l'axe). Équations d'Euler compressibles
+// en volumes finis : MUSCL (van Leer), flux HLLC (HLL près des chocs), Runge-Kutta SSP d'ordre 2. Air réel à
+// l'équilibre (table T(ρ, e)), émission des bandes de N2, N2+ et des raies de N et O vue à travers les fonctions
+// CIE. Le temps est ralenti (plusieurs centaines de fois) : les vitesses réelles sont de plusieurs km/s.
+// =====================================================================
+const PH = { Z0: -0.8, Z1: 18.4, RMAX: 7.2, DX: { low: 0.09, medium: 0.07, high: 0.055, ultra: 0.045 }[qKey] || 0.055, RN: 0.2,
+  AMB_T: 270, AMB_RHO: 1.03e-3, ME: 5, NPR: 300, VMAX: 11000, UVIS: 10, CFL: 0.4, RV: 6.4, ZSMAX: 14.6 };
+PH.NZ = Math.round((PH.Z1 - PH.Z0)/PH.DX); PH.NR = Math.round(PH.RMAX/PH.DX); PH.NC = PH.NZ*PH.NR;
+const PHA = (() => { const T = PH.AMB_T, rho = PH.AMB_RHO, th = TH.thermo(rho, T), p = rho*th.Rp*T; return { rho, T, p, e: th.e, c: Math.sqrt(th.gam*p/rho), h: th.e + p/rho }; })();
+function physJetExit(V){
+  const h0 = PHA.h + V*V/2, pe = PH.NPR*PHA.p;
+  const st = (T) => { let rho = pe/(287*T); for (let k = 0; k < 20; k++) rho = pe/(TH.thermo(rho, T).Rp*T);
+    const th = TH.thermo(rho, T), c = Math.sqrt(th.gam*pe/rho); return { rho, T, p: pe, e: th.e, c, u: PH.ME*c, h: th.e + pe/rho }; };
+  let lo = 20, hi = 40000;
+  for (let k = 0; k < 40; k++){ const m = Math.sqrt(lo*hi), s = st(m); if (s.h + s.u*s.u/2 < h0) lo = m; else hi = m; }
+  return { ...st(Math.sqrt(lo*hi)), h0 };
+}
+const TAB = { NE: 384, NRH: 96, LR0: -9, LR1: 1, LE0: 4.08, LE1: 9.0 };
+const thermoTex = new THREE.DataTexture(new Uint16Array(TAB.NE*TAB.NRH*4), TAB.NE, TAB.NRH, THREE.RGBAFormat, THREE.HalfFloatType);
+thermoTex.magFilter = thermoTex.minFilter = THREE.LinearFilter; thermoTex.generateMipmaps = false;
+let thermoReady = false;
+function buildThermoTable(){
+  if (thermoReady) return; thermoReady = true;
+  const d = thermoTex.image.data, h = THREE.DataUtils.toHalfFloat;
+  for (let a = 0; a < TAB.NRH; a++){
+    const rho = 10**(TAB.LR0 + (TAB.LR1 - TAB.LR0)*(a + 0.5)/TAB.NRH); let Tlo = 10;
+    for (let b = 0; b < TAB.NE; b++){
+      const e = 10**(TAB.LE0 + (TAB.LE1 - TAB.LE0)*(b + 0.5)/TAB.NE);
+      const T = TH.TofE(rho, e, Tlo), th = TH.thermo(rho, T), k = (a*TAB.NE + b)*4;
+      Tlo = Math.max(10, T*0.98); d[k] = h(T/100); d[k+1] = h(th.Rp); d[k+2] = h(th.gam); d[k+3] = h(th.x);
+    }
+  }
+  thermoTex.needsUpdate = true;
+}
+const phU = instancedArray(PH.NC, 'vec4'), phUs = instancedArray(PH.NC, 'vec4');
+const phP = instancedArray(PH.NC*2, 'vec4'), phPs = instancedArray(PH.NC*2, 'vec4');
+const PU = {
+  dt: uniform(1e-6), expo: uniform(1), solid: uniform(1), zs: uniform(12),
+  jetU: uniform(new THREE.Vector4()), jetA: uniform(new THREE.Vector4()), jetB: uniform(new THREE.Vector4()),
+  ambU: uniform(new THREE.Vector4(PHA.rho, 0, 0, PHA.rho*PHA.e)), ambA: uniform(new THREE.Vector4(PHA.rho, 0, 0, PHA.e)),
+  ambB: uniform(new THREE.Vector4(PHA.p, PHA.c, PHA.T, 0)),
+  ax0: uniform(new THREE.Vector3()), axD: uniform(new THREE.Vector3(-1, 0, 0)), axE1: uniform(new THREE.Vector3(0, 1, 0)), axE2: uniform(new THREE.Vector3(0, 0, 1)),
+};
+const wf = (x) => { const s = Number(x).toPrecision(8); return /[.eE]/.test(s) ? s : s + '.0'; };
+const wv3 = (a) => `vec3<f32>(${wf(a[0])}, ${wf(a[1])}, ${wf(a[2])})`;
+// 0 : gaz ; 1 : paroi (bouclier, buse) ; 2 : réservoir du jet (la sortie de la torche)
+const phTypeW = wgslFn(`
+fn phType(z: f32, r: f32, sol: f32, zs: f32) -> f32 {
+  let ra = abs(r);
+  let dz = z - zs;
+  if (sol > 0.5 && dz * dz + ra * ra < ${wf(SR*SR)}) { return 1.0; }
+  if (z < 0.0) {
+    if (ra < ${wf(PH.RN)}) { return 2.0; }
+    if (ra < ${wf(PH.RN + 2*PH.DX)}) { return 1.0; }
+  }
+  return 0.0;
+}`);
+const phLimW = wgslFn(`
+fn phLim(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+  return (a * abs(b) + abs(a) * b) / (abs(a) + abs(b) + vec4<f32>(1e-30));
+}`);
+const phRiemannW = wgslFn(`
+fn phRiemann(wl: vec4<f32>, al: vec2<f32>, wr: vec4<f32>, ar: vec2<f32>, hll: f32) -> vec4<f32> {
+  let rL = wl.x; let uL = wl.y; let vL = wl.z; let pL = wl.w; let cL = al.x;
+  let rR = wr.x; let uR = wr.y; let vR = wr.z; let pR = wr.w; let cR = ar.x;
+  let EL = rL * (al.y + 0.5 * (uL * uL + vL * vL));
+  let ER = rR * (ar.y + 0.5 * (uR * uR + vR * vR));
+  let SL = min(uL - cL, uR - cR);
+  let SR = max(uL + cL, uR + cR);
+  let FL = vec4<f32>(rL * uL, rL * uL * uL + pL, rL * uL * vL, (EL + pL) * uL);
+  let FR = vec4<f32>(rR * uR, rR * uR * uR + pR, rR * uR * vR, (ER + pR) * uR);
+  if (SL >= 0.0) { return FL; }
+  if (SR <= 0.0) { return FR; }
+  let UL = vec4<f32>(rL, rL * uL, rL * vL, EL);
+  let UR = vec4<f32>(rR, rR * uR, rR * vR, ER);
+  if (hll > 0.5) { return (SR * FL - SL * FR + SL * SR * (UR - UL)) / (SR - SL); }
+  let Ss = (pR - pL + rL * uL * (SL - uL) - rR * uR * (SR - uR)) / (rL * (SL - uL) - rR * (SR - uR));
+  if (Ss >= 0.0) {
+    let fL = rL * (SL - uL) / (SL - Ss);
+    let UsL = fL * vec4<f32>(1.0, Ss, vL, EL / rL + (Ss - uL) * (Ss + pL / (rL * (SL - uL))));
+    return FL + SL * (UsL - UL);
+  }
+  let fR = rR * (SR - uR) / (SR - Ss);
+  let UsR = fR * vec4<f32>(1.0, Ss, vR, ER / rR + (Ss - uR) * (Ss + pR / (rR * (SR - uR))));
+  return FR + SR * (UsR - UR);
+}`);
+const phFixW = wgslFn(`
+fn phFix(U: vec4<f32>) -> vec4<f32> {
+  let rho = max(U.x, 1e-9);
+  var m = U.yz;
+  let vm = length(m) / rho;
+  if (vm > 16000.0) { m = m * (16000.0 / vm); }
+  let ke = 0.5 * dot(m, m) / rho;
+  let e = max((U.w - ke) / rho, 13000.0);
+  return vec4<f32>(rho, m.x, m.y, ke + rho * e);
+}`);
+const phEmisW = (() => {
+  const c = TH.C, B = TH.BAND, NA20 = TH.NAV*1e-20, CS20 = c.CSAHA*1e-20;
+  return wgslFn(`
+fn phEmis(rho: f32, T: f32) -> vec3<f32> {
+  if (T < 1500.0) { return vec3<f32>(0.0); }
+  let iT = 1.0 / T;
+  let KN = ${wf(c.RDN/c.WN)} / rho * exp(${wf(-c.TDN)} * iT);
+  let KO = ${wf(c.RDO/c.WO)} / rho * exp(${wf(-c.TDO)} * iT);
+  let aN = 2.0 * sqrt(KN) / (sqrt(KN) + sqrt(KN + 4.0));
+  let aO = 2.0 * sqrt(KO) / (sqrt(KO) + sqrt(KO + 4.0));
+  let mN2 = ${wf(c.WN/c.MN)} * (1.0 - aN);
+  let mNa = ${wf(2*c.WN/c.MN)} * aN;
+  let mOa = ${wf(2*c.WO/c.MO)} * aO;
+  let mA = mNa + mOa;
+  let nA = mA * rho * ${wf(NA20)} + 1e-30;
+  let Sa = ${wf(CS20)} * T * sqrt(T) * (mNa * ${wf(c.GN)} * exp(${wf(-c.TIN)} * iT) + mOa * ${wf(c.GO)} * exp(${wf(-c.TIO)} * iT)) / (mA + 1e-30);
+  let x = 2.0 * sqrt(Sa) / (sqrt(Sa) + sqrt(Sa + 4.0 * nA));
+  let ne = nA * x;
+  let nN2 = mN2 * rho * ${wf(NA20)};
+  let nN = mNa * rho * ${wf(NA20)} * (1.0 - x);
+  let nO = mOa * rho * ${wf(NA20)} * (1.0 - x);
+  let n2fp = nN2 * 1.95e6 * exp(-85300.0 * iT);
+  let n2sp = nN2 * 7.5e8 * exp(-128000.0 * iT);
+  let Sm = ${wf(4*CS20)} * T * sqrt(T) * exp(-180800.0 * iT);
+  let n2pfn = min(nN2 * Sm / max(ne, 1e-8), ne) * 6.5e7 * exp(-36800.0 * iT);
+  let atom = nN * 1.9e8 * exp(-137000.0 * iT) + nO * 1.3e8 * exp(-124000.0 * iT);
+  let cont = ${wf(8*1.42*16250/12.57)} * ne * ne * exp(-27800.0 * iT) / sqrt(T);
+  return n2fp * ${wv3(B.n2fp)} + n2sp * ${wv3(B.n2sp)} + n2pfn * ${wv3(B.n2pfn)} + atom * ${wv3(B.atom)} + cont * ${wv3(B.cont)};
+}`);
+})();
+const phI = (n) => int(n);
+const L10 = Math.LOG10E/Math.LOG2E;
+function eosAt(rho, e){
+  const t = texture(thermoTex, vec2(log2(e).mul(L10).sub(TAB.LE0).div(TAB.LE1 - TAB.LE0), log2(rho).mul(L10).sub(TAB.LR0).div(TAB.LR1 - TAB.LR0))).level(0).toVar();
+  const T = t.x.mul(100).toVar(), p = rho.mul(t.y).mul(T).toVar();
+  return { T, p, c: sqrt(t.z.mul(p).div(rho)) };
+}
+function phCell(){
+  const id = int(instanceIndex).toVar();
+  const i = id.mod(phI(PH.NZ)).toVar(), j = id.div(phI(PH.NZ)).toVar();
+  return { id, i, j, z: float(i).add(0.5).mul(PH.DX).add(PH.Z0).toVar(), r: float(j).add(0.5).mul(PH.DX).toVar() };
+}
+function phRow(jj){ return select(jj.lessThan(phI(0)), jj.negate().sub(phI(1)), min(jj, phI(PH.NR - 1))); }
+function phIdx(ii, jj){ return phRow(jj).mul(phI(PH.NZ)).add(clamp(ii, phI(0), phI(PH.NZ - 1))); }
+const phOut = (ii, jj) => ii.lessThan(phI(0)).or(ii.greaterThan(phI(PH.NZ - 1))).or(jj.greaterThan(phI(PH.NR - 1)));
+function phGetA(Pb, ii, jj){ const a = Pb.element(phIdx(ii, jj).mul(phI(2))); return select(phOut(ii, jj), PU.ambA, vec4(a.x, a.y, select(jj.lessThan(phI(0)), a.z.negate(), a.z), a.w)); }
+function phGetB(Pb, ii, jj){ return select(phOut(ii, jj), PU.ambB, Pb.element(phIdx(ii, jj).mul(phI(2)).add(phI(1)))); }
+function phFace(WLn, WRn, radial, hll){
+  const WL = WLn.toVar(), WR = WRn.toVar();
+  const L = eosAt(WL.x, WL.w), Rr = eosAt(WR.x, WR.w);
+  const wl = radial ? vec4(WL.x, WL.z, WL.y, L.p) : vec4(WL.x, WL.y, WL.z, L.p);
+  const wr = radial ? vec4(WR.x, WR.z, WR.y, Rr.p) : vec4(WR.x, WR.y, WR.z, Rr.p);
+  const f = phRiemannW([wl, vec2(L.c, WL.w), wr, vec2(Rr.c, WR.w), hll]).toVar();
+  return radial ? vec4(f.x, f.z, f.y, f.w) : f;
+}
+function phStage(Pin, Uown, U0, Uout, Pout){
+  return Fn(() => {
+    const { id, i, j, z, r } = phCell();
+    const sol = PU.solid.toVar(), zs = PU.zs.toVar();
+    const t0 = phTypeW([z, r, sol, zs]).toVar();
+    const k2 = id.mul(phI(2)).toVar();
+    If(t0.greaterThan(1.5), () => {
+      Uout.element(id).assign(PU.jetU); Pout.element(k2).assign(PU.jetA); Pout.element(k2.add(phI(1))).assign(PU.jetB);
+    }).ElseIf(t0.greaterThan(0.5), () => {
+      Uout.element(id).assign(PU.ambU); Pout.element(k2).assign(PU.ambA); Pout.element(k2.add(phI(1))).assign(PU.ambB);
+    }).Else(() => {
+      const W = (di, dj) => phGetA(Pin, i.add(phI(di)), j.add(phI(dj))).toVar();
+      const Bv = (di, dj) => phGetB(Pin, i.add(phI(di)), j.add(phI(dj))).toVar();
+      const tt = (di, dj) => phTypeW([z.add(di*PH.DX), r.add(dj*PH.DX), sol, zs]).toVar();
+      const Wc = W(0, 0), Ww = W(-1, 0), Www = W(-2, 0), We = W(1, 0), Wee = W(2, 0);
+      const Ws = W(0, -1), Wss = W(0, -2), Wn = W(0, 1), Wnn = W(0, 2);
+      const Bc = Bv(0, 0), Bw = Bv(-1, 0), Be = Bv(1, 0), Bs = Bv(0, -1), Bn = Bv(0, 1);
+      const tw = tt(-1, 0), tww = tt(-2, 0), te = tt(1, 0), tee = tt(2, 0), ts = tt(0, -1), tss = tt(0, -2), tn = tt(0, 1), tnn = tt(0, 2);
+      const fl = (a, b) => select(a.greaterThan(0.5).or(b.greaterThan(0.5)), float(0), float(1));
+      const solid = (t) => t.greaterThan(0.5).and(t.lessThan(1.5));
+      const szc = phLimW([Wc.sub(Ww), We.sub(Wc)]).mul(fl(tw, te)).toVar();
+      const szw = phLimW([Ww.sub(Www), Wc.sub(Ww)]).mul(fl(tww, tw));
+      const sze = phLimW([We.sub(Wc), Wee.sub(We)]).mul(fl(te, tee));
+      const src = phLimW([Wc.sub(Ws), Wn.sub(Wc)]).mul(fl(ts, tn)).toVar();
+      const srs = phLimW([Ws.sub(Wss), Wc.sub(Ws)]).mul(fl(tss, ts));
+      const srn = phLimW([Wn.sub(Wc), Wnn.sub(Wn)]).mul(fl(tn, tnn));
+      const mz = vec4(Wc.x, Wc.y.negate(), Wc.z, Wc.w), mr = vec4(Wc.x, Wc.y, Wc.z.negate(), Wc.w);
+      const hl = (b) => select(max(Bc.w, b.w).greaterThan(0.25), float(1), float(0));
+      const Fe = phFace(Wc.add(szc.mul(0.5)), select(solid(te), mz, We.sub(sze.mul(0.5))), false, hl(Be));
+      const Fw = phFace(select(solid(tw), mz, Ww.add(szw.mul(0.5))), Wc.sub(szc.mul(0.5)), false, hl(Bw));
+      const Gn = phFace(Wc.add(src.mul(0.5)), select(solid(tn), mr, Wn.sub(srn.mul(0.5))), true, hl(Bn));
+      const Gs = phFace(select(solid(ts), mr, Ws.add(srs.mul(0.5))), Wc.sub(src.mul(0.5)), true, hl(Bs));
+      const rp = r.add(PH.DX*0.5), rm = r.sub(PH.DX*0.5);
+      const rhs = Fe.sub(Fw).div(-PH.DX).sub(Gn.mul(rp).sub(Gs.mul(rm)).div(r.mul(PH.DX))).add(vec4(0, 0, Bc.x.div(r), 0));
+      const Un = Uown.element(id).add(rhs.mul(PU.dt));
+      const Uf = phFixW([U0 ? U0.element(id).add(Un).mul(0.5) : Un]).toVar();
+      const rho = Uf.x, u = Uf.y.div(rho).toVar(), v = Uf.z.div(rho).toVar();
+      const e = Uf.w.div(rho).sub(u.mul(u).add(v.mul(v)).mul(0.5)).toVar();
+      const st = eosAt(rho, e);
+      const sens = max(abs(Be.x.sub(Bw.x)).div(Be.x.add(Bw.x)), abs(Bn.x.sub(Bs.x)).div(Bn.x.add(Bs.x)));
+      Uout.element(id).assign(Uf);
+      Pout.element(k2).assign(vec4(rho, u, v, e));
+      Pout.element(k2.add(phI(1))).assign(vec4(st.p, st.c, st.T, sens));
+    });
+  })().compute(PH.NC);
+}
+const phS1 = phStage(phP, phU, null, phUs, phPs);
+const phS2 = phStage(phPs, phUs, phU, phU, phP);
+const phInit = Fn(() => {
+  const { id, z, r } = phCell();
+  const src = phTypeW([z, r, PU.solid, PU.zs]).greaterThan(1.5);
+  phU.element(id).assign(select(src, PU.jetU, PU.ambU));
+  phP.element(id.mul(phI(2))).assign(select(src, PU.jetA, PU.ambA));
+  phP.element(id.mul(phI(2)).add(phI(1))).assign(select(src, PU.jetB, PU.ambB));
+})().compute(PH.NC);
+const emisTex = new THREE.StorageTexture(PH.NZ, PH.NR); emisTex.type = THREE.HalfFloatType;
+const phEmisK = Fn(() => {
+  const { id, i, j, z, r } = phCell();
+  const a = phP.element(id.mul(phI(2))), b = phP.element(id.mul(phI(2)).add(phI(1)));
+  const t0 = phTypeW([z, r, PU.solid, PU.zs]);
+  const wall = t0.greaterThan(0.5).and(t0.lessThan(1.5));
+  const rgb = select(wall, vec3(0), min(phEmisW([a.x, b.z]).mul(PU.expo), vec3(6e4)));
+  textureStore(emisTex, uvec2(uint(i), uint(j)), vec4(rgb, b.z.mul(1e-4))).toWriteOnly();
+})().compute(PH.NC);
+// rendu : émission intégrée le long de chaque rayon (gaz optiquement mince)
+const phSegW = wgslFn(`
+fn phSeg(ro: vec3<f32>, rd: vec3<f32>, AO: vec3<f32>, AD: vec3<f32>, SS: vec3<f32>) -> vec2<f32> {
+  let oc = ro - AO;
+  let a0 = dot(oc, AD); let b0 = dot(rd, AD);
+  let ocp = oc - a0 * AD; let rdp = rd - b0 * AD;
+  let A = dot(rdp, rdp); let B = 2.0 * dot(ocp, rdp); let Cc = dot(ocp, ocp) - ${wf(PH.RV*PH.RV)};
+  let disc = B * B - 4.0 * A * Cc;
+  if (disc < 0.0 || A < 1e-8) { return vec2<f32>(1.0, 0.0); }
+  let sq = sqrt(disc);
+  var t0 = (-B - sq) / (2.0 * A);
+  var t1 = (-B + sq) / (2.0 * A);
+  if (abs(b0) > 1e-6) {
+    let tz0 = (${wf(PH.Z0)} - a0) / b0; let tz1 = (${wf(PH.Z1)} - a0) / b0;
+    t0 = max(t0, min(tz0, tz1)); t1 = min(t1, max(tz0, tz1));
+  }
+  let os = ro - SS;
+  let bs = dot(os, rd); let ds = bs * bs - (dot(os, os) - ${wf(SR*SR)});
+  if (ds > 0.0) { let ts = -bs - sqrt(ds); if (ts > 0.0) { t1 = min(t1, ts); } }
+  if (rd.y < 0.0) { t1 = min(t1, -ro.y / rd.y); }
+  return vec2<f32>(max(t0, 0.0), t1);
+}`);
+const plasmaPhMat = new THREE.MeshBasicNodeMaterial({ fog:false, transparent: true, depthTest: false, depthWrite: false, side: THREE.BackSide });
+plasmaPhMat.blending = THREE.CustomBlending; plasmaPhMat.blendEquation = THREE.AddEquation;
+plasmaPhMat.blendSrc = THREE.OneFactor; plasmaPhMat.blendDst = THREE.OneFactor; plasmaPhMat.blendSrcAlpha = THREE.ZeroFactor; plasmaPhMat.blendDstAlpha = THREE.OneFactor;
+const PH_STEPS = { low: 56, medium: 72, high: 96, ultra: 120 }[qKey] || 96;
+const uPhGain = uniform(0), uPhShield = uniform(new THREE.Vector3());
+plasmaPhMat.fragmentNode = Fn(() => {
+  const ro = cameraPosition, rd = normalize(positionWorld.sub(cameraPosition)).toVar();
+  const seg = phSegW([ro, rd, PU.ax0, PU.axD, uPhShield]).toVar();
+  If(seg.y.lessThanEqual(seg.x), () => { Discard(); });
+  const ds = seg.y.sub(seg.x).div(PH_STEPS).toVar();
+  const jit = interleavedGradientNoise(screenCoordinate.xy).toVar();
+  const acc = vec3(0).toVar();
+  Loop(PH_STEPS, ({ i }) => {
+    const p = ro.add(rd.mul(seg.x.add(float(i).add(jit).mul(ds))));
+    const q = p.sub(PU.ax0), zz = dot(q, PU.axD), rv = q.sub(PU.axD.mul(zz)), rr = length(rv);
+    const ang = atan(dot(rv, PU.axE2), dot(rv, PU.axE1));
+    const nz = texture(flowTex, vec2(ang.mul(1.5/Math.PI).add(zz.mul(0.02)), zz.mul(0.07).sub(uTime.mul(0.45)))).level(0).r;
+    const rq = rr.mul(nz.sub(0.5).mul(0.09).add(1));
+    acc.addAssign(texture(emisTex, vec2(zz.sub(PH.Z0).div(PH.Z1 - PH.Z0), rq.div(PH.RMAX))).level(0).rgb);
+  });
+  const L = acc.mul(ds).mul(uPhGain).toVar();
+  // raies hors du gamut sRGB (violet de N2+, rouge de N2) : désaturées vers la luminance
+  const Y = max(dot(L, vec3(0.2126, 0.7152, 0.0722)), 0).toVar();
+  const m = min(min(L.x, L.y), L.z);
+  const k = select(m.lessThan(0), Y.div(max(Y.sub(m), 1e-6)), float(1));
+  return vec4(max(mix(vec3(Y), L, k), vec3(0)), 1);
+})();
+const plasmaPh = new THREE.Mesh(new THREE.BoxGeometry(PH.Z1 - PH.Z0, PH.RV*2, PH.RV*2), plasmaPhMat);
+plasmaPh.frustumCulled = false; plasmaPh.renderOrder = 6; plasmaPh.visible = false; scene.add(plasmaPh);
+const phTypeJS = (zs) => { const t = new Uint8Array(PH.NC);
+  for (let j = 0; j < PH.NR; j++) for (let i = 0; i < PH.NZ; i++){ const z = PH.Z0 + (i + 0.5)*PH.DX, r = (j + 0.5)*PH.DX;
+    t[j*PH.NZ + i] = (z - zs)**2 + r*r < SR*SR ? 1 : z < 0 && r < PH.RN ? 2 : z < 0 && r < PH.RN + 2*PH.DX ? 1 : 0; } return t; };
+const phys = { active: false, warm: 0, V: 0, ulim: 1500, kappa: 100, jetKey: -1, expo: 1, expoT: 0, maxSub: { low: 6, medium: 10, high: 14, ultra: 20 }[qKey] || 12, slow: 0, busy: false, clock: 0,
+  wallT: 300, wallTs: 300, Tmax: 0, ne: 0, rgb: [1, 0.3, 0.8], peak: 0, ready: false, boost: 0, standoff: 0, qs: 0, zs: 12, types: null, typesZs: -1 };
+const phAx0 = new THREE.Vector3(), phAxD = new THREE.Vector3(-1, 0, 0);
+function physSetJet(V, force){
+  const key = Math.round(V/25);
+  if (!force && key === phys.jetKey) return;
+  phys.jetKey = key; phys.V = V;
+  if (V < 300){ PU.jetU.value.copy(PU.ambU.value); PU.jetA.value.copy(PU.ambA.value); PU.jetB.value.copy(PU.ambB.value); phys.ulim = 1500; return; }
+  const J = physJetExit(V);
+  PU.jetU.value.set(J.rho, J.rho*J.u, 0, J.rho*(J.e + 0.5*J.u*J.u)); PU.jetA.value.set(J.rho, J.u, 0, J.e); PU.jetB.value.set(J.p, J.c, J.T, 0);
+  phys.ulim = Math.sqrt(2*J.h0);
+}
+const physDtCFL = () => PH.CFL*PH.DX/(1.25*Math.max(phys.ulim, 1500) + 600);
+function physRun(n){ for (let k = 0; k < n; k += 80){ const ps = []; for (let q = 0; q < Math.min(80, n - k); q++) ps.push(phS1, phS2); renderer.compute(ps); } }
+function physRestart(V){
+  buildThermoTable();
+  physSetJet(V, true);
+  renderer.compute(phInit);
+  // le jet souffle d'abord sans bouclier pour chasser l'air immobile, puis le choc se forme devant le bouclier
+  const ul = Math.max(phys.ulim, 1500), dtc = physDtCFL();
+  PU.dt.value = dtc; PU.solid.value = 0; physRun(Math.min(900, Math.ceil(1.1*(phys.zs + SR + 1)/ul/dtc)));
+  PU.solid.value = 1; physRun(Math.min(600, Math.ceil(5*SR/ul/dtc)));
+  renderer.compute(phEmisK);
+  phys.ready = false; phys.boost = 1.0;
+  physReadStats();
+}
+function physAdvance(dtRaw, V){
+  physSetJet(V, false);
+  phys.kappa = Math.max(phys.ulim, 1500)/PH.UVIS;
+  const speed = phys.boost > 0 ? 3 : 1; phys.boost -= dtRaw;
+  const realDt = dtRaw*speed/phys.kappa, dtc = physDtCFL();
+  const need = Math.max(1, Math.ceil(realDt/dtc)), n = Math.min(need, phys.maxSub*speed);
+  PU.dt.value = realDt/need;
+  const ps = []; for (let k = 0; k < n; k++) ps.push(phS1, phS2); ps.push(phEmisK); renderer.compute(ps);
+}
+// relevés : température maximale, électrons, distance du choc, flux de Sutton-Graves, température de paroi
+async function physReadStats(){
+  phys.busy = true;
+  try {
+    const Pa = new Float32Array(await renderer.getArrayBufferAsync(phP.value));
+    if (phys.typesZs !== phys.zs){ phys.types = phTypeJS(phys.zs); phys.typesZs = phys.zs; }
+    const types = phys.types;
+    let Tmax = 0, ne = 0, best = 0, rgb = [0, 0, 0];
+    for (let k = 0; k < PH.NC; k++){
+      if (types[k] !== 0) continue;
+      const T = Pa[k*8 + 6]; if (T > Tmax) Tmax = T;
+      if (!(T > 2800) || (k & 1)) continue;
+      const em = TH.emission(Pa[k*8], T); if (em.ne > ne) ne = em.ne;
+      const b = Math.max(em.rgb[0], em.rgb[1], em.rgb[2]); if (b > best){ best = b; rgb = em.rgb; }
+    }
+    const iN = Math.floor((phys.zs - SR - PH.Z0)/PH.DX) - 1, pN = Pa[iN*8 + 4];
+    let iS = 0; for (let i = iN; i > 0; i--) if (Pa[i*8 + 4] < 0.3*pN){ iS = i; break; }
+    const iF = Math.max(iS - 4, 0), rhoF = Pa[iF*8], uF = Math.max(Pa[iF*8 + 1], 0);
+    const qs = 1.7415e-4*Math.sqrt(rhoF/SR)*uF*uF*uF;
+    phys.wallT = Math.min(2990, Math.max(300, Math.pow(qs/(0.85*5.670374e-8), 0.25)));
+    phys.Tmax = Tmax; phys.ne = ne; phys.standoff = (iN - iS)*PH.DX; phys.qs = qs;
+    const gasRGB = rgb.map((v) => Math.max(v, 0)*0.6), peak = Math.max(best*0.6, 1e-7), ms = Math.max(...gasRGB);
+    if (ms > 0) phys.rgb = gasRGB.map((v) => v/ms);
+    phys.peak = peak;
+    phys.expoT = 3*Math.pow(peak/0.9, 0.35)/peak;
+    if (!phys.ready) phys.expo = phys.expoT;
+    phys.ready = true;
+  } catch (err) { /* relevé impossible : on garde les précédents */ }
+  finally { phys.busy = false; }
+}
+
 // ---------- son : effets générés avec ElevenLabs (texte vers son), pilotés en direct par la simulation ----------
 const SFX = JSON.parse(document.getElementById('sfxdata').textContent);
 const AAC_D = 2112/48000;                                      // décalage d'amorçage de l'encodeur AAC
@@ -1231,9 +1661,53 @@ function frame(){
   basis();
   traceBeam(shieldOn);
   const K = plasmaK*fireLevel, FLv = fireLevel*(1 - plasmaK);
+  // ---- rentrée réelle : écoulement compressible calculé quand le plasma frappe le bouclier ----
+  let phOn = false;
+  {
+    const dist = tmpV.copy(SC).sub(nozzle).length();
+    const wantPh = P.phys && P.shield && plasmaK > 0.5 && fireLevel > 0.3 && beamHitShield && dist > SR + 1.2;
+    const Vj = wantPh ? PH.VMAX*THREE.MathUtils.clamp((E - 1.0)/1.6, 0.2, 1) : 0;
+    if (wantPh || phys.active){
+      phAxD.copy(SC).sub(nozzle).normalize();
+      const zs = Math.min(dist, PH.ZSMAX);
+      phAx0.copy(SC).addScaledVector(phAxD, -zs);
+      if (Math.abs(zs - phys.zs) > 0.02){ phys.zs = zs; PU.zs.value = zs; }
+      PU.ax0.value.copy(phAx0); PU.axD.value.copy(phAxD);
+      PU.axE1.value.set(0, 1, 0).addScaledVector(phAxD, -phAxD.y).normalize(); PU.axE2.value.crossVectors(phAxD, PU.axE1.value).normalize();
+      uPhShield.value.copy(SC);
+    }
+    if (wantPh){ if (!phys.active){ physRestart(Vj); phys.active = true; } phys.warm = 1.6; }
+    else if (phys.active){ phys.warm -= dt; if (phys.warm <= 0){ phys.active = false; phys.ready = false; } }
+    if (phys.active){
+      physAdvance(dt, Vj);
+      phys.clock += dt;
+      if (!phys.busy && phys.clock > 0.25){ phys.clock = 0; physReadStats(); }
+      if (phys.expoT) phys.expo += (phys.expoT - phys.expo)*(1 - Math.exp(-dt*1.5));
+      PU.expo.value = phys.expo;
+      phys.wallTs += ((wantPh ? phys.wallT : 300) - phys.wallTs)*(1 - Math.exp(-dt*0.8));
+      phys.slow = rawDt > 1/16 ? phys.slow + rawDt : Math.max(0, phys.slow - rawDt*0.5);
+      if (phys.slow > 2 && phys.maxSub > 8){ phys.maxSub = Math.max(8, Math.round(phys.maxSub*0.7)); phys.slow = 0; }
+      uPhGain.value = phys.ready ? 0.3*Math.min(1, phys.warm/0.6) : 0;
+      plasmaPh.position.copy(phAx0).addScaledVector(phAxD, (PH.Z0 + PH.Z1)/2);
+      plasmaPh.quaternion.setFromUnitVectors(tmpA.set(1, 0, 0), phAxD);
+      phOn = wantPh;
+      if (wantPh && phys.ready){
+        const mach = Math.round(Vj/PHA.c);
+        modeEl.textContent = `RENTRÉE RÉELLE · MACH ${mach} · RALENTI ×${Math.round(phys.kappa/10)*10}`; modeEl.style.color = '#d9a6ff';
+        tlabEl.textContent = 'Plasma (calculé)';
+        const Tc = Math.max(20, phys.Tmax - 273);
+        tvalEl.textContent = Math.round(Tc/10)*10 > 0 ? (Math.round(Tc/10)*10).toLocaleString('fr-FR') + ' °C' : '20 °C';
+        tfillEl.style.width = (Math.log10(Math.max(Tc, 20)/20)/Math.log10(40000/20)*100).toFixed(1) + '%';
+        cinfoEl.textContent = `${(Vj/1000).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} km/s · choc à ${Math.round(phys.standoff*100)} cm · flux ${(phys.qs/1e6).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} MW/m² · paroi ${Math.round(phys.wallTs)} K`;
+      } else if (wantPh){ modeEl.textContent = 'RENTRÉE RÉELLE · CALCUL DU CHOC…'; }
+    }
+    plasmaPh.visible = phys.active;
+    if (phOn){ uEnergy.value *= 0.2; uPlasma.value *= 0.25; }
+    uShDim.value += ((phOn && phys.ready ? 0.18 : 1) - uShDim.value)*Math.min(1, dt*3);   // le bouclier montre surtout sa paroi incandescente
+  }
 
   // plasma spray particles
-  if (firing){ emitAcc += 650*Math.min(P.power, 2)*THREE.MathUtils.smoothstep(plasmaK, 0.02, 0.4)*dt; const n = Math.floor(emitAcc); emitAcc -= n; emitPlasma(n, dt, plasmaK); }
+  if (firing && !phOn){ emitAcc += 650*Math.min(P.power, 2)*THREE.MathUtils.smoothstep(plasmaK, 0.02, 0.4)*dt; const n = Math.floor(emitAcc); emitAcc -= n; emitPlasma(n, dt, plasmaK); }
   const drag = Math.exp(-1.15*dt), R2 = SR + 0.12, pp = pPosAttr.array, pd = pDatAttr.array;
   let hc = 0;
   for (let i = 0; i < MAXF; i++){
@@ -1317,13 +1791,13 @@ function frame(){
   const bScale = Math.sqrt(THREE.MathUtils.clamp(P.spread/0.12, 0.4, 2.2));
   const beams = [beamCore, beamGlow, beamHalo], radii = [0.06*(1 + oc*0.7)*bScale, 0.3*(1 + oc*0.5)*bScale, 0.7*(1 + oc*0.4)*bScale], intens = [0.7, 0.18, 0.05];
   beams.forEach((b, i) => {
-    b.visible = K > 0.01; if (!b.visible) return;
+    b.visible = K > 0.01 && !phOn; if (!b.visible) return;
     b.position.copy(nozzle); b.lookAt(beamEnd);
     const r = radii[i]*(0.9 + Math.random()*0.15); b.scale.set(r, r, beamLen);
     const U = b.userData.U; U.len.value = beamLen; U.R.value = r; U.I.value = K*intens[i]*(1 + oc*0.3);
   });
   pulses.forEach(pm => {
-    pm.visible = K > 0.05; if (!pm.visible) return;
+    pm.visible = K > 0.05 && !phOn; if (!pm.visible) return;
     const ph = (pm.userData.ph + time*(1.6 + oc*1.4)) % 1;
     pm.position.copy(nozzle).addScaledVector(aimDir, beamLen*ph); pm.lookAt(tmpV.copy(pm.position).add(aimDir));
     pm.scale.setScalar((0.35 + ph*0.9)*(1 + oc*0.5)); pm.userData.I.value = K*Math.sin(Math.PI*ph)*0.9;
@@ -1331,7 +1805,7 @@ function frame(){
   const flick = 0.8 + Math.random()*0.4;
   impactFlare.position.copy(beamEnd).addScaledVector(beamN, 0.08); impactFlare.quaternion.copy(camera.quaternion);
   impactFlare.scale.setScalar((2.0 + oc*2)*(0.85 + Math.random()*0.3));
-  impactFlare.userData.I.value = (beamHitShield || beamHitGround) ? K*flick*0.22 : 0; impactFlare.userData.C.value.setRGB(2.2, 1.0, 1.9);
+  impactFlare.userData.I.value = (beamHitShield || beamHitGround) && !phOn ? K*flick*0.22 : 0; impactFlare.userData.C.value.setRGB(2.2, 1.0, 1.9);
   muzzleFlare.position.copy(nozzle); muzzleFlare.quaternion.copy(camera.quaternion);
   muzzleFlare.scale.setScalar((1.2 + plasmaK*1.4 + oc)*(0.85 + Math.random()*0.3));
   muzzleFlare.userData.I.value = fireLevel*(0.15 + plasmaK*0.35)*flick + (trigger ? 0.1 + ignite*0.9 : 0)*flick;
@@ -1357,7 +1831,7 @@ function frame(){
     }
     const chargeK = THREE.MathUtils.smoothstep(E, 0.95, 1.3)*(1 - plasmaK);
     if (chargeK > 0.05 && Math.random() < chargeK) for (let i = 0; i < 2; i++) bolt(nozzle, nozzle.clone().add(rv(0.45)), 0.1, 3, [1.2*chargeK, 1.8*chargeK, 3.5*chargeK], 1.4, 0);
-    if (K > 0.05){
+    if (K > 0.05 && !phOn){
       const cB = [3.0*K, 2.2*K, 5.0*K], nB = Math.round(3 + 6*K + oc*6);
       for (let b = 0; b < nB; b++){
         const t0 = Math.random()*0.85, t1 = Math.min(1, t0 + 0.06 + Math.random()*0.22), a0 = Math.random()*Math.PI*2, a1 = a0 + (Math.random() - .5)*2.5;
@@ -1409,7 +1883,11 @@ function frame(){
     scGlowing = glowing; uWet.value = uRain.value;
   }
   // ---- shield damage: heating by fire / plasma, overheating breaks it, slow regeneration when cool ----
-  if (beamHitShield && P.shield){
+  if (phOn && phys.ready && P.shield){
+    // paroi en équilibre radiatif : T ∝ q^¼ avec q ∝ cos^1,5 θ autour du point d'arrêt (chaleur 1 = 1 900 K)
+    const ax = -phAxD.x, ay = -phAxD.y, az = -phAxD.z, rate = Math.min(1, dt*2.5);
+    for (let i = 0; i < SDN; i++){ const d = dmgDir[i*3]*ax + dmgDir[i*3+1]*ay + dmgDir[i*3+2]*az; if (d > 0.02){ const tgt = (phys.wallTs*Math.pow(d, 0.375) - 300)/1600; if (dmgH[i] < tgt) dmgH[i] += (tgt - dmgH[i])*rate; } }
+  } else if (beamHitShield && P.shield){
     const n = tmpA.copy(beamEnd).sub(SC).normalize();
     if (FLv > 0.15){ heatShield(n.x, n.y, n.z, FLv*0.72*dt*(P.gas === 'napalm' ? 1.4 : 1), 0.55); heatShield(n.x, n.y, n.z, FLv*0.22*dt, 0.95); }
     if (K > 0.08) heatShield(n.x, n.y, n.z, K*(2.4 + oc*4)*dt, 0.16 + 0.08*Math.sqrt(THREE.MathUtils.clamp(P.spread/0.12, 0.4, 2.2)));
@@ -1426,6 +1904,9 @@ function frame(){
     if (holes > holeCount && (holeCount === 0 || holes - holeCount > 2)) sfxShot('breach', 0.8, 0.9 + Math.random()*0.15, beamEnd, 0.9, 0.5);
     if (holes !== holeCount){ holeCount = holes; maskDirty = true; }
     aOvh = P.shield ? ovh : 0; shieldIntegA = sumI/SDN;
+    { let hm = 0; for (let i = 0; i < SDN; i++) if (dmgH[i] > hm) hm = dmgH[i];
+      const Tm = Math.min(3000, 300 + 1600*hm); const lum = Tm > 600 ? Math.max(...TH.blackbody(Tm))*0.85*bbNorm : 0;
+      const tgtE = lum > 0.8 ? Math.max(0.08, Math.pow(0.8/lum, 0.8)) : 1; uBBExpo.value += (tgtE - uBBExpo.value)*Math.min(1, dt*3); }
     const pct = Math.round(sumI/SDN*100);
     shudEl.textContent = P.shield ? `Bouclier : ${pct} %${holes ? ' · percé' : ''}` : 'Bouclier : désactivé';
     shudEl.style.color = holes ? '#ff9b6a' : (pct < 98 ? '#ffd2a0' : '');
@@ -1492,7 +1973,7 @@ function frame(){
     }
     aRL.needsUpdate = true;
   }
-  uIon.value = THREE.MathUtils.smoothstep(E, 1.0, 2.0)*fireLevel;
+  uIon.value = THREE.MathUtils.smoothstep(E, 1.0, 2.0)*fireLevel*(phOn ? 0 : 1);
   // dispersion = real jet geometry: narrow nozzle -> thinner, faster jet; wide -> broad, slower plume
   uJetR0.value = 0.12 + P.spread*1.4; uJetR1.value = 0.25 + P.spread*4.6;
   uJetSpeed.value = 26*THREE.MathUtils.clamp(Math.sqrt(0.12/P.spread), 0.65, 1.6); uBeamLen.value = beamLen; uOC.value = oc;
@@ -1526,6 +2007,7 @@ function frame(){
   nozzleLight.intensity = 30*fireLevel*flick*Math.min(P.power, 2)*(1 - plasmaK*0.45);
   impactLight.position.copy(impactPt).addScaledVector(beamHitShield ? beamN : up, 1.2); impactLight.color.copy(colImpF).lerp(colImpP, plasmaK);
   impactLight.intensity = 60*Math.min(1, energy*1.5 + K*0.6)*flick*(1 + oc*0.3)*(1 + (1 - plasmaK)*0.7);
+  if (phOn && phys.ready){ const Ip = Math.min(3.5, phys.peak*phys.expo*0.35); impactLight.color.setRGB(phys.rgb[0], phys.rgb[1], phys.rgb[2]); impactLight.intensity = 14*Ip*flick; impactLight.position.copy(SC).addScaledVector(phAxD, -(SR + 1.2)); }
   beamLight.position.copy(nozzle).addScaledVector(aimDir, beamLen*0.5); beamLight.intensity = 14*K*flick*(1 + oc*0.5);
   handLight.position.copy(pts.hand).lerp(pts.handL, 0.5); handLight.intensity = trigger ? (5 + ignite*45)*(0.6 + Math.random()*0.8) : 0;
 
