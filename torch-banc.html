@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TORCH · Banc d'essai paroi</title>
+<style>
+:root{--bg:#0b0d10;--panel:#12161b;--line:#232a33;--ink:#e6e9ee;--dim:#8b95a3;--acc:#ff9a3c;--ok:#4cc38a;--warn:#f2c14e;--bad:#ff5d5d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
+header{padding:22px 28px 10px}
+h1{margin:0;font:600 20px/1.2 ui-monospace,Menlo,monospace;letter-spacing:.06em}
+h1 b{color:var(--acc)}
+header p{margin:6px 0 0;color:var(--dim);max-width:980px}
+main{display:grid;grid-template-columns:330px 1fr;gap:18px;padding:12px 28px 28px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card h2{margin:0 0 10px;font:600 12px/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;color:var(--dim);text-transform:uppercase}
+label{display:block;margin:12px 0 4px;color:var(--dim);font-size:12.5px}
+label b{color:var(--ink);font-weight:600;float:right;font-family:ui-monospace,Menlo,monospace}
+input[type=range]{width:100%;accent-color:var(--acc)}
+select,input[type=number]{width:100%;background:#0d1014;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+.row{display:flex;gap:8px;align-items:center;margin-top:10px;color:var(--ink);font-size:13px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+small,.dim{color:var(--dim)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th{color:var(--dim);font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.06em}
+td:first-child,th:first-child{text-align:left}
+tr.sel{background:#1a2027}
+tr{cursor:pointer}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11.5px;font-weight:600}
+.ok{background:rgba(76,195,138,.15);color:var(--ok)}.warn{background:rgba(242,193,78,.15);color:var(--warn)}.bad{background:rgba(255,93,93,.15);color:var(--bad)}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+canvas{width:100%;display:block}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+.verdict{margin-top:14px;padding:12px 14px;border-left:3px solid var(--acc);background:#15191f;border-radius:0 8px 8px 0}
+.verdict p{margin:4px 0}
+.notes{margin-top:18px;color:var(--dim);font-size:12.5px}
+.notes li{margin:3px 0}
+.mono{font-family:ui-monospace,Menlo,monospace}
+@media (max-width:1000px){main{grid-template-columns:1fr}.charts{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1><b>TORCH</b> · BANC D'ESSAI PAROI</h1>
+  <p>Ta borne de poussée V7 dépend du flux de chaleur que la paroi peut encaisser. Ce banc calcule, pour chaque matériau, la température de la face exposée au plasma, le flux maximal admissible et la poussée que ça autorise si elle varie comme le flux. Modèle thermique 1D, régime permanent et transitoire. Propriétés typiques à l'état non irradié.</p>
+</header>
+<main>
+<section>
+  <div class="card">
+    <h2>Conditions</h2>
+    <label>Flux de chaleur sur la paroi <b id="vq"></b></label>
+    <input id="q" type="range" min="0" max="100" step="0.1" value="50">
+    <small>Repères : 10 MW/m² = conception stationnaire du divertor d'ITER · 25 MW/m² = défaut de TORCH Lab</small>
+    <label>Refroidissement</label>
+    <select id="cool">
+      <option value="eau">Eau pressurisée (h 100 kW/m².K, 150 °C)</option>
+      <option value="he">Hélium gazeux (h 30 kW/m².K, 600 °C)</option>
+      <option value="lm">Métal liquide (h 50 kW/m².K, 400 °C)</option>
+      <option value="rad">Aucun : rayonnement seul vers l'espace</option>
+      <option value="custom">Personnalisé</option>
+    </select>
+    <div class="grid2" id="customBox">
+      <div><label>h (kW/m².K)</label><input id="h" type="number" value="100" min="0" step="5"></div>
+      <div><label>Fluide (°C)</label><input id="tc" type="number" value="150" step="10"></div>
+    </div>
+    <label>Flux critique du fluide <b id="vchf"></b></label>
+    <input id="chf" type="range" min="5" max="80" step="1" value="30">
+    <small>Au-delà, le fluide ne suit plus (crise d'ébullition pour l'eau). 30 MW/m² : ordre de grandeur pour des tubes de divertor à eau.</small>
+    <label>Épaisseur du blindage avant <b id="vL"></b></label>
+    <input id="L" type="range" min="1" max="20" step="0.5" value="5">
+    <div class="row"><input id="sink" type="checkbox"> Puits thermique CuCrZr derrière (monobloc type ITER)</div>
+    <label>Épaisseur du puits CuCrZr <b id="vLs"></b></label>
+    <input id="Ls" type="range" min="1" max="10" step="0.5" value="3">
+    <div class="row"><input id="useLim" type="checkbox" checked> Respecter les limites d'usage (recristallisation, recuit, fluage, évaporation)</div>
+  </div>
+  <div class="card" style="margin-top:18px">
+    <h2>Lien avec la poussée TORCH</h2>
+    <label>Poussée de référence <b id="vF"></b></label>
+    <input id="F" type="range" min="0.1" max="2" step="0.05" value="0.6">
+    <label>au flux de référence (MW/m²)</label>
+    <input id="qref" type="number" value="10" min="1" step="1">
+    <small>Hypothèse : à surface de paroi fixe, la poussée maximale est proportionnelle au flux admissible (ta borne V7 : F fixée par flux × surface). 0,6 MN à 10 MW/m² = bas de ta ligne 10 MW/m².</small>
+  </div>
+</section>
+<section>
+  <div class="card">
+    <h2>Résultats par matériau <span class="dim" style="text-transform:none;letter-spacing:0">(clique une ligne pour le transitoire)</span></h2>
+    <table id="tab"><thead><tr>
+      <th>Matériau</th><th>Surface</th><th>Rayonné</th><th>État</th><th>Flux max</th><th>Limité par</th><th>Poussée max</th>
+    </tr></thead><tbody></tbody></table>
+    <div class="verdict" id="verdict"></div>
+  </div>
+  <div class="charts">
+    <div class="card"><h2>Température de surface selon le flux</h2><canvas id="c1" height="330"></canvas></div>
+    <div class="card"><h2 id="c2t">Montée en température</h2><canvas id="c2" height="330"></canvas><div class="dim" id="c2info" style="margin-top:6px;font-size:12.5px"></div></div>
+  </div>
+  <div class="card notes">
+    <h2>Ce que ce banc ne modélise pas</h2>
+    <ul>
+      <li>Géométrie réelle (monobloc, tuiles, ailettes) : ici une plaque plane 1D, refroidie sur toute sa face arrière.</li>
+      <li>Irradiation neutronique (conductivité qui chute, gonflement), pulvérisation et érosion par le plasma, hélium piégé (« fuzz » sur le tungstène).</li>
+      <li>Contraintes thermomécaniques et fissuration par cyclage (souvent la vraie limite avant la fusion).</li>
+      <li>Transitoires rapides (disruptions, ELM) et rayonnement renvoyé par le reste de la chambre.</li>
+      <li>Le radiateur final du vaisseau : la chaleur extraite par le fluide doit encore être rejetée dans l'espace, ce qui est un autre bilan de masse.</li>
+      <li>Propriétés : valeurs typiques de la littérature (tungstène, béryllium, CuCrZr, SiC/SiC, Ta4HfC5, lithium) et ordres de grandeur pour CFC, Mo et Ta. Émissivités de surfaces propres.</li>
+    </ul>
+  </div>
+</section>
+</main>
+<script>
+// Banc d'essai paroi TORCH : moteur thermique (régime permanent + transitoire 1D)
+const SIG = 5.670374419e-8;
+// k(T) en W/(m.K) : points (T en K, k), interpolation linéaire, constante au-delà du dernier point
+const MATS = [
+  { id: "W", nom: "Tungstène", k: [[300, 173], [1273, 113], [2400, 93], [3695, 90]], eps: 0.35, rho: 19300, cp: 140, Tfus: 3695, Tuse: 1473, use: "recristallisation (~1 200 °C)",
+    note: "Référence ITER/DEMO. Point de fusion le plus haut des métaux, mais fragile et recristallise vers 1 200 °C." },
+  { id: "Mo", nom: "Molybdène", k: [[300, 138], [1500, 100], [2896, 90]], eps: 0.3, rho: 10220, cp: 250, Tfus: 2896, Tuse: null, use: "",
+    note: "Réfractaire plus léger que W, mais fond 800 K plus bas. Valeurs typiques." },
+  { id: "Ta", nom: "Tantale", k: [[300, 57], [2000, 62], [3290, 64]], eps: 0.3, rho: 16650, cp: 140, Tfus: 3290, Tuse: null, use: "",
+    note: "Réfractaire ductile, conductivité environ trois fois plus faible que W. Valeurs typiques." },
+  { id: "CFC", nom: "Composite carbone CFC (axe des fibres)", k: [[300, 300], [1000, 180], [2000, 120], [3915, 110]], eps: 0.85, rho: 1900, cp: 1400, Tfus: 3915, Tuse: null, use: "",
+    note: "Sublime à 3 915 K. Conductivité très dépendante de l'orientation des fibres et effondrée sous irradiation neutronique. Ordre de grandeur." },
+  { id: "Be", nom: "Béryllium", k: [[300, 200], [800, 125], [1560, 90]], eps: 0.5, rho: 1850, cp: 1800, Tfus: 1560, Tuse: null, use: "",
+    note: "Première paroi d'ITER. Fond à 1 287 °C." },
+  { id: "CuCrZr", nom: "Cuivre CuCrZr (puits thermique)", k: [[300, 320], [723, 330], [1350, 330]], eps: 0.2, rho: 8900, cp: 390, Tfus: 1350, Tuse: 723, use: "recuit (~450 °C)",
+    note: "Excellent conducteur, mais limité vers 450 °C. Sert de puits thermique derrière le tungstène dans les monoblocs ITER." },
+  { id: "SiC", nom: "Composite SiC/SiC", k: [[300, 18], [773, 15], [1273, 8], [3100, 8]], eps: 0.85, rho: 3000, cp: 1100, Tfus: 3100, Tuse: 1273, use: "usage ~1 000 °C",
+    note: "Faible activation, mais conduit mal (15 à 8 W/m.K entre 500 et 1 000 °C)." },
+  { id: "TaHfC", nom: "Carbure Ta4HfC5", k: [[300, 3.3], [1273, 6.5], [4200, 8]], eps: 0.8, rho: 14500, cp: 200, Tfus: 4200, Tuse: null, use: "",
+    note: "Un des points de fusion les plus hauts connus (au-delà de 4 000 K), mais conductivité de 3,3 à 6,5 W/m.K (pièces frittées laser)." },
+  { id: "RAFM", nom: "Acier RAFM (Eurofer)", k: [[300, 28], [873, 30], [1811, 30]], eps: 0.4, rho: 7800, cp: 550, Tfus: 1811, Tuse: 873, use: "fluage (~550 à 600 °C)",
+    note: "Acier de structure à faible activation, limité vers 550 à 600 °C." },
+  { id: "Li", nom: "Lithium liquide (couche)", k: [[300, 45], [1073, 50], [1615, 50]], eps: 0.12, rho: 500, cp: 4200, Tfus: 1615, Tuse: 1073, use: "évaporation (700 à 800 °C)",
+    note: "Surface liquide auto-réparatrice. Limite : évaporation au-delà de 700 à 800 °C. Écoulement, évaporation et écran de vapeur non modélisés." },
+];
+const kAt = (m, T) => { const p = m.k; if (T <= p[0][0]) return p[0][1]; for (let i = 1; i < p.length; i++){ if (T <= p[i][0]){ const a = p[i - 1], b = p[i]; return a[1] + (b[1] - a[1]) * (T - a[0]) / (b[0] - a[0]); } } return p[p.length - 1][1]; };
+// transformée de Kirchhoff : theta(T) = intégrale de k dT depuis 300 K (exacte pour k linéaire par morceaux)
+function theta(m, T){
+  if (T <= 300) return -kAt(m, 300) * (300 - T);
+  let s = 0, Tp = 300, kp = kAt(m, 300);
+  const pts = m.k.map((x) => x[0]).filter((x) => x > 300 && x < T).concat([T]);
+  for (const t of pts){ const kt = kAt(m, t); s += 0.5 * (kp + kt) * (t - Tp); Tp = t; kp = kt; }
+  return s;
+}
+// régime permanent : flux q (W/m²) sur la face avant d'une plaque d'épaisseur L (m),
+// refroidie à l'arrière (coefficient h, fluide à Tc) et rayonnant à l'avant vers un fond à Tenv
+function steady(m, q, L, cool){
+  const rad = (T) => m.eps * SIG * (T ** 4 - cool.Tenv ** 4);
+  const cond = (Ts) => {
+    if (!cool.on) return { q: 0, Tb: Ts };
+    let lo = cool.Tc, hi = Ts;
+    for (let i = 0; i < 70; i++){ const Tb = 0.5 * (lo + hi); const f = (theta(m, Ts) - theta(m, Tb)) / L - cool.h * (Tb - cool.Tc); if (f > 0) lo = Tb; else hi = Tb; }
+    const Tb = 0.5 * (lo + hi); return { q: cool.h * (Tb - cool.Tc), Tb };
+  };
+  let lo = Math.max(cool.on ? cool.Tc : cool.Tenv, 1), hi = 60000;
+  for (let i = 0; i < 70; i++){ const Ts = 0.5 * (lo + hi); if (rad(Ts) + cond(Ts).q < q) lo = Ts; else hi = Ts; }
+  const Ts = 0.5 * (lo + hi), c = cond(Ts);
+  return { Ts, Tb: c.Tb, qrad: rad(Ts), qcond: c.q, fracRad: rad(Ts) / q };
+}
+
+// empilement de couches (avant -> arrière) : layers = [{ m, L }, ...]. Retourne la température de chaque interface.
+function steadyStack(layers, q, cool){
+  const m0 = layers[0].m, rad = (T) => m0.eps * SIG * (T ** 4 - cool.Tenv ** 4);
+  const invTheta = (m, target, lo, hi) => { for (let i = 0; i < 60; i++){ const T = 0.5 * (lo + hi); if (theta(m, T) > target) hi = T; else lo = T; } return 0.5 * (lo + hi); };
+  // pour une surface à Ts et un flux conduit qc, températures des interfaces successives
+  const walk = (Ts, qc) => { const Ti = [Ts]; let T = Ts; for (const ly of layers){ T = invTheta(ly.m, theta(ly.m, T) - qc * ly.L, Math.min(cool.on ? cool.Tc : 3, T) - 5000, T); Ti.push(T); } return Ti; };
+  const cond = (Ts) => {
+    if (!cool.on) return { q: 0, Ti: layers.map(() => Ts).concat([Ts]) };
+    let lo = 0, hi = Math.max(1, 4 * (theta(layers[0].m, Ts) - theta(layers[0].m, cool.Tc)) / layers[0].L + cool.h * (Ts - cool.Tc));
+    for (let i = 0; i < 70; i++){ const qc = 0.5 * (lo + hi); const Ti = walk(Ts, qc); if (cool.h * (Ti[Ti.length - 1] - cool.Tc) > qc) lo = qc; else hi = qc; }
+    const qc = 0.5 * (lo + hi); return { q: qc, Ti: walk(Ts, qc) };
+  };
+  let lo = Math.max(cool.on ? cool.Tc : cool.Tenv, 1), hi = 60000;
+  for (let i = 0; i < 64; i++){ const Ts = 0.5 * (lo + hi); if (rad(Ts) + cond(Ts).q < q) lo = Ts; else hi = Ts; }
+  const Ts = 0.5 * (lo + hi), c = cond(Ts);
+  return { Ts, Ti: c.Ti, qrad: rad(Ts), qcond: c.q };
+}
+// verdict : chaque couche doit rester sous sa limite (fusion, et limite d'usage si demandée) à sa face la plus chaude
+function stackLimitOK(layers, r, useLimit){ return layers.every((ly, i) => r.Ti[i] < (useLimit && ly.m.Tuse ? Math.min(ly.m.Tuse, ly.m.Tfus) : ly.m.Tfus)); }
+function qMaxStack(layers, cool, useLimit, chf){
+  let lo = 1e3, hi = 1e10;
+  for (let i = 0; i < 50; i++){ const q = Math.sqrt(lo * hi); const r = steadyStack(layers, q, cool); const ok = stackLimitOK(layers, r, useLimit) && (!cool.on || !chf || r.qcond < chf); if (ok) lo = q; else hi = q; }
+  return lo;
+}
+
+// flux maximal (W/m²) tel que la surface reste sous Tlim
+function qMax(m, L, cool, Tlim){
+  let lo = 1e3, hi = 1e10;
+  for (let i = 0; i < 60; i++){ const q = Math.sqrt(lo * hi); if (steady(m, q, L, cool).Ts < Tlim) lo = q; else hi = q; }
+  return lo;
+}
+// transitoire 1D (différences finies explicites) : températures avant et arrière en fonction du temps
+function transient(m, q, L, cool, tEnd, N = 40){
+  const dx = L / (N - 1), T0 = cool.on ? cool.Tc : 300;
+  let T = new Float64Array(N).fill(T0);
+  const kmax = Math.max(...m.k.map((p) => p[1])), dt = 0.35 * dx * dx * m.rho * m.cp / kmax;
+  const out = [], rec = tEnd / 240; let t = 0, nextRec = 0, tMelt = null, tUse = null;
+  const Tn = new Float64Array(N);
+  while (t < tEnd){
+    for (let i = 0; i < N; i++){
+      let flux = 0;
+      if (i > 0) flux += kAt(m, 0.5 * (T[i] + T[i - 1])) * (T[i - 1] - T[i]) / dx;
+      if (i < N - 1) flux += kAt(m, 0.5 * (T[i] + T[i + 1])) * (T[i + 1] - T[i]) / dx;
+      if (i === 0) flux += q - m.eps * SIG * (T[0] ** 4 - cool.Tenv ** 4);
+      if (i === N - 1 && cool.on) flux += cool.h * (cool.Tc - T[i]);
+      const vol = (i === 0 || i === N - 1) ? dx / 2 : dx;
+      Tn[i] = T[i] + dt * flux / (m.rho * m.cp * vol);
+    }
+    T.set(Tn); t += dt;
+    if (tUse === null && m.Tuse && T[0] >= m.Tuse) tUse = t;
+    if (tMelt === null && T[0] >= m.Tfus) tMelt = t;
+    if (t >= nextRec){ out.push([t, T[0], T[N - 1]]); nextRec += rec; }
+    if (tMelt !== null && t > tMelt + 3 * rec) break;
+  }
+  return { pts: out, tMelt, tUse };
+}
+if (typeof module !== "undefined") module.exports = { SIG, MATS, kAt, theta, steady, qMax, transient, steadyStack, qMaxStack, stackLimitOK };
+
+const COLORS = { W:'#ff9a3c', Mo:'#c9a46a', Ta:'#8fa3b8', CFC:'#9b8cff', Be:'#4cc38a', CuCrZr:'#e0703a', SiC:'#5fb3d9', TaHfC:'#ff6fae', RAFM:'#a0a0a0', Li:'#f2e14e' };
+const COOL = { eau:{ h:100, tc:150, chf:30 }, he:{ h:30, tc:600, chf:20 }, lm:{ h:50, tc:400, chf:60 }, rad:null };
+const $ = (id) => document.getElementById(id);
+let sel = 'W';
+const qFromSlider = (v) => Math.pow(10, Math.log10(0.5) + (Math.log10(200) - Math.log10(0.5))*v/100);   // 0,5 à 200 MW/m²
+const sliderFromQ = (q) => 100*(Math.log10(q) - Math.log10(0.5))/(Math.log10(200) - Math.log10(0.5));
+$('q').value = sliderFromQ(10);
+const fmtK = (T) => Math.round(T).toLocaleString('fr-FR') + ' K';
+const fmtC = (T) => Math.round(T - 273.15).toLocaleString('fr-FR') + ' °C';
+const fmtQ = (q) => (q >= 100 ? Math.round(q) : q >= 10 ? q.toFixed(1) : q.toFixed(2)).toString().replace('.', ',') + ' MW/m²';
+function state(){
+  const c = $('cool').value;
+  $('customBox').style.display = c === 'custom' ? '' : 'none';
+  const on = c !== 'rad';
+  const cool = { on, h: +$('h').value*1e3, Tc: +$('tc').value + 273.15, Tenv: 3 };
+  return { q: qFromSlider(+$('q').value)*1e6, cool, chf: on ? +$('chf').value*1e6 : 0, L: +$('L').value/1000, sink: $('sink').checked && on, Ls: +$('Ls').value/1000,
+    useLim: $('useLim').checked, F: +$('F').value, qref: +$('qref').value*1e6 };
+}
+const CU = MATS.find(m => m.id === 'CuCrZr');
+const layersFor = (m, S) => S.sink && m.id !== 'CuCrZr' ? [{ m, L: S.L }, { m: CU, L: S.Ls }] : [{ m, L: S.L }];
+function limitedBy(layers, S, qmax){
+  const r = steadyStack(layers, qmax*1.02, S.cool);
+  if (S.cool.on && S.chf && r.qcond >= S.chf*0.999) return 'flux critique du fluide';
+  for (let i = 0; i < layers.length; i++){ const m = layers[i].m; const lim = S.useLim && m.Tuse ? Math.min(m.Tuse, m.Tfus) : m.Tfus;
+    if (r.Ti[i] >= lim) return (layers.length > 1 ? m.id + ' : ' : '') + (S.useLim && m.Tuse && m.Tuse < m.Tfus ? m.use : (m.id === 'CFC' ? 'sublimation' : 'fusion')); }
+  return '';
+}
+function run(){
+  const S = state();
+  $('vq').textContent = fmtQ(S.q/1e6); $('vL').textContent = (S.L*1000).toString().replace('.', ',') + ' mm'; $('vLs').textContent = (S.Ls*1000).toString().replace('.', ',') + ' mm';
+  $('vchf').textContent = S.cool.on ? fmtQ(S.chf/1e6) : 'sans objet'; $('vF').textContent = S.F.toFixed(2).replace('.', ',') + ' MN';
+  $('Ls').disabled = !S.sink; $('chf').disabled = !S.cool.on;
+  const tb = $('tab').querySelector('tbody'); tb.innerHTML = '';
+  const res = [];
+  for (const m of MATS){
+    const layers = layersFor(m, S);
+    const r = steadyStack(layers, S.q, S.cool);
+    const lim = (i) => { const mm = layers[i].m; return S.useLim && mm.Tuse ? Math.min(mm.Tuse, mm.Tfus) : mm.Tfus; };
+    let st = 'ok', stTxt = 'tient';
+    for (let i = 0; i < layers.length; i++){
+      if (r.Ti[i] >= layers[i].m.Tfus){ st = 'bad'; stTxt = layers.length > 1 && i > 0 ? 'puits fondu' : (m.id === 'CFC' ? 'sublime' : 'fond'); break; }
+      if (r.Ti[i] >= lim(i)){ st = 'warn'; stTxt = 'limite d\'usage'; }
+    }
+    if (st !== 'bad' && S.cool.on && S.chf && r.qcond > S.chf){ st = 'bad'; stTxt = 'fluide saturé'; }
+    const qm = qMaxStack(layers, S.cool, S.useLim, S.chf);
+    const F = S.F*qm/S.qref;
+    res.push({ m, r, st, qm, F });
+    const tr = document.createElement('tr'); if (m.id === sel) tr.className = 'sel';
+    tr.innerHTML = `<td><span class="sw" style="background:${COLORS[m.id]}"></span>${m.nom}${layers.length > 1 ? ' <span class="dim">+ CuCrZr</span>' : ''}</td>
+      <td class="mono">${fmtK(r.Ts)}<br><span class="dim">${fmtC(r.Ts)}</span></td>
+      <td class="mono">${Math.round(100*r.qrad/S.q)} %</td>
+      <td><span class="pill ${st}">${stTxt}</span></td>
+      <td class="mono">${fmtQ(qm/1e6)}</td>
+      <td class="dim">${limitedBy(layers, S, qm)}</td>
+      <td class="mono">${F >= 10 ? F.toFixed(0) : F.toFixed(2).replace('.', ',')} MN</td>`;
+    tr.title = m.note;
+    tr.onclick = () => { sel = m.id; run(); };
+    tb.appendChild(tr);
+  }
+  // verdict
+  const ok = res.filter(x => x.st === 'ok'), best = [...res].sort((a, b) => b.qm - a.qm)[0];
+  const radOnlyNote = !S.cool.on ? `<p>Sans refroidissement, la paroi doit tout rayonner : à ${fmtQ(S.q/1e6)}, même une surface noire idéale atteindrait ${fmtK(Math.pow(S.q/SIG, 0.25))}.</p>` : '';
+  $('verdict').innerHTML = `<p><b>À ${fmtQ(S.q/1e6)} :</b> ${ok.length ? ok.map(x => x.m.id).join(', ') + ' tien' + (ok.length > 1 ? 'nent' : 't') + ' dans ces conditions.' : 'aucun matériau ne tient dans ces conditions.'}</p>
+    <p>Meilleur flux admissible : <b>${best.m.nom}</b>, ${fmtQ(best.qm/1e6)}, soit une poussée max d'environ <b>${best.F.toFixed(2).replace('.', ',')} MN</b> avec ta référence.</p>${radOnlyNote}`;
+  drawCurves(S); drawTransient(S);
+}
+// ---- graphiques ----
+function setup(cv){ const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1; cv.width = r.width*d; cv.height = 330*d; const g = cv.getContext('2d'); g.scale(d, d); return { g, w: r.width, h: 330 }; }
+function axes(g, w, h, pad, xl, yl){
+  g.strokeStyle = '#2a323c'; g.fillStyle = '#8b95a3'; g.font = '11px ui-monospace,Menlo,monospace'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(pad.l, pad.t); g.lineTo(pad.l, h - pad.b); g.lineTo(w - pad.r, h - pad.b); g.stroke();
+  g.fillText(xl, w - pad.r - g.measureText(xl).width, h - 6); g.save(); g.translate(12, pad.t + 4); g.rotate(-Math.PI/2); g.textAlign = 'right'; g.fillText(yl, 0, 0); g.restore();
+}
+function drawCurves(S){
+  const { g, w, h } = setup($('c1')), pad = { l: 52, r: 14, t: 12, b: 34 };
+  const x = (q) => pad.l + (Math.log10(q) - Math.log10(0.5))/(Math.log10(200) - Math.log10(0.5))*(w - pad.l - pad.r);
+  const Tmax = 5000, y = (T) => h - pad.b - (Math.min(T, Tmax) - 0)/Tmax*(h - pad.t - pad.b);
+  axes(g, w, h, pad, 'flux (MW/m², échelle log)', 'surface (K)');
+  for (const T of [1000, 2000, 3000, 4000, 5000]){ g.fillText(T, 8, y(T) + 4); g.strokeStyle = '#1b2129'; g.beginPath(); g.moveTo(pad.l, y(T)); g.lineTo(w - pad.r, y(T)); g.stroke(); }
+  for (const q of [1, 10, 100]){ g.fillStyle = '#8b95a3'; g.fillText(q, x(q) - 6, h - pad.b + 14); g.strokeStyle = '#1b2129'; g.beginPath(); g.moveTo(x(q), pad.t); g.lineTo(x(q), h - pad.b); g.stroke(); }
+  for (const m of MATS){
+    const layers = layersFor(m, S); g.strokeStyle = COLORS[m.id]; g.lineWidth = m.id === sel ? 2.6 : 1.3; g.globalAlpha = m.id === sel ? 1 : 0.75; g.beginPath();
+    let melt = null;
+    for (let i = 0; i <= 60; i++){ const q = Math.pow(10, Math.log10(0.5) + i/60*(Math.log10(200) - Math.log10(0.5))); const T = steadyStack(layers, q*1e6, S.cool).Ts; if (i) g.lineTo(x(q), y(T)); else g.moveTo(x(q), y(T)); if (melt === null && T >= m.Tfus) melt = [q, m.Tfus]; }
+    g.stroke(); g.globalAlpha = 1;
+    if (melt){ g.fillStyle = COLORS[m.id]; g.beginPath(); g.arc(x(melt[0]), y(melt[1]), 3.5, 0, 7); g.fill(); }
+  }
+  g.strokeStyle = '#ff9a3c'; g.setLineDash([4, 4]); g.lineWidth = 1; g.beginPath(); g.moveTo(x(S.q/1e6), pad.t); g.lineTo(x(S.q/1e6), h - pad.b); g.stroke(); g.setLineDash([]);
+  g.fillStyle = '#8b95a3'; g.fillText('point = fusion', pad.l + 8, pad.t + 12);
+}
+function drawTransient(S){
+  const m = MATS.find(mm => mm.id === sel), { g, w, h } = setup($('c2')), pad = { l: 52, r: 14, t: 12, b: 34 };
+  const tEnd = S.cool.on ? 4 : 20, tr = transient(m, S.q, S.L, S.cool, tEnd);
+  const Tmax = Math.max(m.Tfus*1.1, ...tr.pts.map(p => p[1])), x = (t) => pad.l + t/tEnd*(w - pad.l - pad.r), y = (T) => h - pad.b - Math.min(T, Tmax)/Tmax*(h - pad.t - pad.b);
+  axes(g, w, h, pad, 'temps (s)', 'température (K)');
+  for (let k = 0; k <= 4; k++){ const T = Math.round(Tmax*k/4/100)*100; g.fillText(T, 8, y(T) + 4); }
+  for (let k = 0; k <= 4; k++){ const t = tEnd*k/4; g.fillText(t.toFixed(0), x(t) - 3, h - pad.b + 14); }
+  const line = (T, col, txt) => { g.strokeStyle = col; g.setLineDash([5, 4]); g.beginPath(); g.moveTo(pad.l, y(T)); g.lineTo(w - pad.r, y(T)); g.stroke(); g.setLineDash([]); g.fillStyle = col; g.fillText(txt, w - pad.r - g.measureText(txt).width, y(T) - 4); };
+  line(m.Tfus, '#ff5d5d', m.id === 'CFC' ? 'sublimation' : 'fusion'); if (m.Tuse) line(m.Tuse, '#f2c14e', m.use.split(' (')[0]);
+  for (const [k, col] of [[1, COLORS[m.id]], [2, '#5d6875']]){ g.strokeStyle = col; g.lineWidth = k === 1 ? 2.4 : 1.4; g.beginPath(); tr.pts.forEach((p, i) => { if (i) g.lineTo(x(p[0]), y(p[k])); else g.moveTo(x(p[0]), y(p[k])); }); g.stroke(); }
+  $('c2t').textContent = 'Montée en température : ' + m.nom;
+  $('c2info').innerHTML = `Trait plein : face exposée · gris : face arrière (${(S.L*1000).toString().replace('.', ',')} mm, ${m.id} seul). ` +
+    (tr.tMelt ? `<b style="color:#ff5d5d">${m.id === 'CFC' ? 'Sublimation' : 'Fusion'} de surface après ${tr.tMelt.toFixed(2).replace('.', ',')} s.</b> ` : `Pas de fusion en ${tEnd} s. `) +
+    (tr.tUse ? `Limite d'usage atteinte après ${tr.tUse.toFixed(2).replace('.', ',')} s.` : '') + `<br>${m.note}`;
+}
+for (const id of ['q', 'cool', 'h', 'tc', 'chf', 'L', 'sink', 'Ls', 'useLim', 'F', 'qref']) $(id).addEventListener('input', run);
+$('cool').addEventListener('change', () => { const c = COOL[$('cool').value]; if (c){ $('h').value = c.h; $('tc').value = c.tc; $('chf').value = c.chf; } run(); });
+addEventListener('resize', run);
+run();
+</script>
+</body>
+</html>

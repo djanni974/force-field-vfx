@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TORCH · Simulateur de propulseur (WebGPU + TSL)</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#05070a;color:#e6e9ee;font:13px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
+canvas{display:block}
+#hud{position:fixed;left:16px;top:14px;font:12px/1.55 ui-monospace,Menlo,monospace;pointer-events:none;text-shadow:0 1px 2px #000;max-width:520px}
+#hud b{color:#ff9a3c}
+#hud .t{font-size:15px;font-weight:700;letter-spacing:.08em}
+#hud .k{color:#8b95a3}
+#hud .big{font-size:14px;color:#fff}
+#panel{position:fixed;right:14px;top:14px;width:300px;max-height:calc(100% - 28px);overflow:auto;background:rgba(12,15,19,.86);border:1px solid #232a33;border-radius:10px;padding:12px 14px;backdrop-filter:blur(6px)}
+#panel h3{margin:10px 0 4px;font:600 11px/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;color:#8b95a3;text-transform:uppercase}
+#panel label{display:block;margin:7px 0 0;font-size:12.5px;color:#c6ccd4}
+#panel label b{float:right;font-family:ui-monospace,Menlo,monospace;color:#fff;font-weight:600}
+#panel input[type=range]{width:100%;accent-color:#ff9a3c}
+#panel small{display:block;color:#7d8794;font-size:11.5px;margin-top:2px}
+#panel button{margin-top:10px;width:100%;background:#1b2129;color:#e6e9ee;border:1px solid #2c3540;border-radius:6px;padding:6px;font:inherit;cursor:pointer}
+#legend{position:fixed;left:16px;bottom:14px;font:11.5px/1.6 ui-monospace,Menlo,monospace;color:#9aa4b1;pointer-events:none}
+.sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 5px 0 12px;vertical-align:0}
+#loading,#nogpu{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font:13px/1.6 ui-monospace,Menlo,monospace;color:#c6ccd4;text-align:center}
+#nogpu{display:none;padding:24px}
+.ok{color:#4cc38a}.warn{color:#f2c14e}.bad{color:#ff5d5d}
+</style>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+  "three/webgpu":"https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+  "three/tsl":"https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.tsl.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="hud">
+  <div class="t"><b>TORCH</b> · PROPULSEUR D-³He À CHAMP INVERSÉ</div>
+  <div class="k">Produits de fusion suivis un par un dans le champ magnétique calculé (WebGPU + TSL)</div>
+  <div id="stats" style="margin-top:8px">Mesure en cours…</div>
+</div>
+<div id="panel">
+  <h3>Moteur</h3>
+  <label>Puissance de fusion <b id="vP"></b></label><input id="P" type="range" min="1" max="200" step="1" value="10">
+  <label>Champ du solénoïde <b id="vB"></b></label><input id="B" type="range" min="1" max="12" step="0.1" value="5">
+  <label>Anneau de courant FRC <b id="vF"></b></label><input id="F" type="range" min="0" max="3" step="0.05" value="1.6">
+  <small>Champ propre de l'anneau rapporté au solénoïde. Au-dessus de 1, le champ s'inverse sur l'axe : lignes fermées (FRC).</small>
+  <label>Miroir arrière <b id="vM"></b></label><input id="M" type="range" min="0" max="4" step="0.05" value="2">
+  <label>Tuyère magnétique <b id="vN"></b></label><input id="N" type="range" min="0" max="2" step="0.05" value="1">
+  <label>Rayon de la chambre <b id="vR"></b></label><input id="R" type="range" min="1" max="2.6" step="0.05" value="1.6">
+  <h3>Physique</h3>
+  <label>Ralentissement des produits <b id="vS"></b></label><input id="S" type="range" min="1" max="40" step="1" value="5">
+  <small>Temps de ralentissement sur le plasma, en temps de traversée de la chambre. En réalité il vaut des millions : seules les pertes promptes comptent.</small>
+  <label>P chargée / P bremsstrahlung <b id="vX"></b></label><input id="X" type="range" min="1" max="15" step="0.1" value="5.9">
+  <small>5,9 = mélange optimal de ta V7. Le bremsstrahlung frappe toute la paroi.</small>
+  <h3>Jet</h3>
+  <label>Vitesse d'éjection vₑ <b id="vV"></b></label><input id="V" type="range" min="20" max="500" step="5" value="100">
+  <label>Rendement de la tuyère <b id="vE"></b></label><input id="E" type="range" min="0.2" max="1" step="0.01" value="0.8">
+  <label style="margin-top:10px"><input id="showWall" type="checkbox" checked> Afficher la paroi</label>
+  <label><input id="showLines" type="checkbox" checked> Afficher les lignes de champ</label>
+  <button id="reset">Relancer les particules</button>
+  <small style="margin-top:8px">Glisser : tourner · molette : zoom</small>
+</div>
+<div id="legend"><span class="sw" style="background:#7fb6ff;margin-left:0"></span>protons 14,7 MeV<span class="sw" style="background:#ffb050"></span>alphas 3,6 MeV<span class="sw" style="background:#ff8c3a"></span>lignes fermées (FRC)<span class="sw" style="background:#4f8fd8"></span>lignes ouvertes · paroi colorée selon le flux de chaleur</div>
+<div id="links" style="position:fixed;right:330px;bottom:14px;font:11.5px ui-monospace,Menlo,monospace"><a href="torch-banc.html" style="color:#ff9a3c">Banc d'essai paroi</a></div>
+<div id="loading">Calcul du champ magnétique et compilation WebGPU…</div>
+<div id="nogpu">Ce simulateur a besoin de WebGPU (Chrome ou Edge récents).</div>
+<script type="module">
+import * as THREE from 'three/webgpu';
+import { Fn, If, Loop, uniform, instancedArray, instanceIndex, float, int, vec2, vec3, vec4, struct, atomicAdd, atomicStore,
+  texture, length, cross, dot, mix, max, min, exp, log, sqrt, sin, cos, floor, clamp, select, hash, uv, pass, positionLocal, normalWorld, cameraPosition, positionWorld, pow, abs } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+
+if (!navigator.gpu){ document.getElementById('loading').style.display = 'none'; document.getElementById('nogpu').style.display = 'flex'; throw new Error('WebGPU indisponible'); }
+const $ = (id) => document.getElementById(id);
+const Q = new URLSearchParams(location.search).get('q') || 'high';
+const NP = { low: 1 << 16, medium: 1 << 17, high: 1 << 18, ultra: 1 << 19 }[Q] || (1 << 18);
+const SUB = 16;                 // sous-pas de Boris par image
+const DT = 1.2e-10;             // pas de temps (s) : ~1/50 de période cyclotron d'un proton à 5 T
+const MU0 = 4e-7*Math.PI;
+
+// ---------------- géométrie (mètres, axe du moteur = z) ----------------
+const G = { zBack: -5, zExit: 3, zFar: 11, rFar: 3.8, zRing: -1, aRing: 0.8, RMAX: 4.2, ZMIN: -7, ZMAX: 12.5, NR: 210, NZ: 650, NB: 64 };
+const SP = { p: { m: 1.67262e-27, q: 1.602177e-19, E: 14.7 }, a: { m: 6.64466e-27, q: 3.204354e-19, E: 3.6 } };
+for (const s of Object.values(SP)){ s.v0 = Math.sqrt(2*s.E*1.602177e-13/s.m); s.qm = s.q/s.m; }
+const PREF = SP.p.m*SP.p.v0/100;   // unité de quantité de mouvement pour les compteurs entiers
+
+// ---------------- champ magnétique : spires circulaires (intégrales elliptiques par moyenne arithmético-géométrique) ----------------
+function ellipKE(m){ // m = k²
+  let a = 1, b = Math.sqrt(Math.max(1 - m, 1e-15)), c = Math.sqrt(m), sum = 0.5*c*c, p2 = 0.5;
+  for (let i = 0; i < 12 && Math.abs(c) > 1e-12; i++){ const an = 0.5*(a + b); c = 0.5*(a - b); b = Math.sqrt(a*b); a = an; p2 *= 2; sum += p2*c*c; }
+  const K = Math.PI/(2*a); return [K, K*(1 - sum)];
+}
+// champ (Br, Bz) et flux ψ = r·Aφ d'une spire de rayon a, courant I, en z0, au point (r, z)
+function loop(a, z0, I, r, z, out){
+  const dz = z - z0, rr = Math.max(r, 1e-6), s = (a + rr)**2 + dz*dz, m = 4*a*rr/s, [K, E] = ellipKE(Math.min(m, 1 - 1e-12));
+  const d2 = (a - rr)**2 + dz*dz, c = MU0*I/(2*Math.PI*Math.sqrt(s));
+  out[1] += c*(K + (a*a - rr*rr - dz*dz)/d2*E);
+  out[0] += c*dz/rr*(-K + (a*a + rr*rr + dz*dz)/d2*E);
+  const k = Math.sqrt(m); out[2] += rr*(MU0*I/(Math.PI*k))*Math.sqrt(a/rr)*((1 - m/2)*K - E);
+}
+let coils = [];
+function buildCoils(S){
+  const c = [], Rw = S.R, rc = Rw + 0.3;
+  for (let i = 0; i < 9; i++) c.push({ a: rc, z: G.zBack + 0.5 + i*(G.zExit - G.zBack - 1)/8, I: 1, g: 'sol' });
+  c.push({ a: Math.max(0.6, Rw*0.7), z: G.zBack - 0.3, I: 1, g: 'mir' });
+  c.push({ a: rc + 0.5, z: G.zExit + 1.2, I: 1, g: 'noz1' }, { a: rc + 1.4, z: G.zExit + 3.2, I: 1, g: 'noz2' });
+  c.push({ a: G.aRing, z: G.zRing, I: -1, g: 'ring' });
+  // calibrage : courants pour obtenir B0 au centre (solénoïde seul) et le rapport demandé pour l'anneau
+  const o = [0, 0, 0]; for (const k of c.filter(k => k.g === 'sol')) loop(k.a, k.z, 1, 0, G.zRing, o);
+  const Isol = S.B/o[1];
+  for (const k of c){
+    if (k.g === 'sol') k.I = Isol;
+    if (k.g === 'mir') k.I = Isol*S.M*1.6;
+    if (k.g === 'noz1') k.I = Isol*0.9*S.N;
+    if (k.g === 'noz2') k.I = Isol*0.7*S.N;
+    if (k.g === 'ring') k.I = -S.F*S.B*2*G.aRing/MU0;   // champ propre au centre = F·B0
+  }
+  return c;
+}
+const fieldData = new Uint16Array(G.NR*G.NZ*4), Br = new Float32Array(G.NR*G.NZ), Bz = new Float32Array(G.NR*G.NZ), Psi = new Float32Array(G.NR*G.NZ);
+const fieldTex = new THREE.DataTexture(fieldData, G.NR, G.NZ, THREE.RGBAFormat, THREE.HalfFloatType);
+fieldTex.magFilter = fieldTex.minFilter = THREE.LinearFilter; fieldTex.generateMipmaps = false;
+function computeField(){
+  const h = THREE.DataUtils.toHalfFloat, o = [0, 0, 0];
+  for (let j = 0; j < G.NZ; j++){ const z = G.ZMIN + (j + 0.5)/G.NZ*(G.ZMAX - G.ZMIN);
+    for (let i = 0; i < G.NR; i++){ const r = (i + 0.5)/G.NR*G.RMAX; o[0] = o[1] = o[2] = 0;
+      for (const k of coils) loop(k.a, k.z, k.I, r, z, o);
+      const id = j*G.NR + i; Br[id] = o[0]; Bz[id] = o[1]; Psi[id] = o[2];
+      fieldData[id*4] = h(o[0]); fieldData[id*4 + 1] = h(o[1]); fieldData[id*4 + 2] = 0; fieldData[id*4 + 3] = h(1); } }
+  fieldTex.needsUpdate = true;
+}
+const fieldAt = (r, z) => { // bilinéaire côté CPU
+  const x = Math.min(G.NR - 1.001, Math.max(0, r/G.RMAX*G.NR - 0.5)), y = Math.min(G.NZ - 1.001, Math.max(0, (z - G.ZMIN)/(G.ZMAX - G.ZMIN)*G.NZ - 0.5));
+  const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, id = j*G.NR + i;
+  const L = (A) => (A[id]*(1 - fx) + A[id + 1]*fx)*(1 - fy) + (A[id + G.NR]*(1 - fx) + A[id + G.NR + 1]*fx)*fy;
+  return [L(Br), L(Bz), L(Psi)];
+};
+
+// ---------------- rendu ----------------
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5)); renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x05070a);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.05, 200);
+camera.position.set(2.5, 5.5, 12.5);
+const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true; controls.target.set(1.5, 0, 0);
+const eng = new THREE.Group(); eng.rotation.y = Math.PI/2; scene.add(eng);   // axe z du moteur -> axe x de l'écran
+scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+const dl = new THREE.DirectionalLight(0xffffff, 1.2); dl.position.set(3, 8, 6); scene.add(dl);
+
+// paroi de la chambre, colorée par le flux de chaleur mesuré
+const heatData = new Uint16Array(G.NB*4), heatTex = new THREE.DataTexture(heatData, G.NB, 1, THREE.RGBAFormat, THREE.HalfFloatType);
+heatTex.magFilter = heatTex.minFilter = THREE.LinearFilter; heatTex.needsUpdate = true;
+const uHeatMax = uniform(30);
+const wallMat = new THREE.MeshBasicNodeMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false });
+wallMat.colorNode = Fn(() => {
+  const t = texture(heatTex, vec2(uv().y, 0.5)).r.div(uHeatMax).clamp(0, 1);
+  // échelle : bleu froid -> rouge -> jaune -> blanc au maximum mesuré
+  const c = mix(vec3(0.05, 0.12, 0.25), vec3(0.85, 0.12, 0.04), t.clamp(0, 0.5).mul(2)).add(vec3(0.9, 0.75, 0.3).mul(t.sub(0.5).clamp(0, 0.5).mul(2)));
+  return c.mul(0.55);
+})();
+wallMat.opacityNode = Fn(() => { const n = normalWorld, v = cameraPosition.sub(positionWorld).normalize(); const t = texture(heatTex, vec2(uv().y, 0.5)).r.div(uHeatMax).clamp(0, 1); return abs(dot(n, v)).oneMinus().mul(0.16).add(0.025).add(t.mul(t).mul(0.06)); })();
+let wall;
+function buildWall(Rw){
+  if (wall){ eng.remove(wall); wall.geometry.dispose(); }
+  const g = new THREE.CylinderGeometry(Rw, Rw, G.zExit - G.zBack, 72, 1, true); g.rotateX(Math.PI/2); g.translate(0, 0, (G.zBack + G.zExit)/2);
+  // uv.y le long de z (de l'arrière vers la sortie)
+  const pos = g.attributes.position, uvA = g.attributes.uv; for (let i = 0; i < pos.count; i++) uvA.setY(i, (pos.getZ(i) - G.zBack)/(G.zExit - G.zBack));
+  wall = new THREE.Mesh(g, wallMat); wall.renderOrder = 2; wall.visible = document.getElementById('showWall').checked; eng.add(wall);
+}
+// bobines
+const coilGroup = new THREE.Group(); eng.add(coilGroup);
+function buildCoilMeshes(){
+  coilGroup.clear();
+  for (const k of coils){
+    if (k.g === 'ring') continue;
+    const m = new THREE.Mesh(new THREE.TorusGeometry(k.a, 0.07 + Math.min(0.12, Math.abs(k.I)/4e7), 10, 64), new THREE.MeshStandardMaterial({ color: k.g === 'mir' ? 0x9a7bff : k.g.startsWith('noz') ? 0x3fa6c9 : 0xb87333, metalness: 0.6, roughness: 0.4 }));
+    m.position.z = k.z; coilGroup.add(m);
+  }
+}
+// lignes de champ : contours du flux ψ (marching squares), dans deux plans méridiens
+const flMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.75 });
+let flLines, sepInfo = 'non';
+function buildFieldLines(S){
+  if (flLines){ eng.remove(flLines); flLines.geometry.dispose(); }
+  const psiW = fieldAt(S.R, G.zRing)[2], seg = [], col = [];
+  const levels = []; for (let k = 0; k <= 14; k++) levels.push(psiW*k/10);
+  // lignes fermées : flux de signe opposé à l'intérieur de la séparatrice (champ inversé)
+  let psiIn = 0; for (let j = 0; j < G.NZ; j++){ const z = G.ZMIN + (j + 0.5)/G.NZ*(G.ZMAX - G.ZMIN); if (z < G.zBack || z > G.zExit) continue;
+    for (let i = 0; i < G.NR; i++){ const r = (i + 0.5)/G.NR*G.RMAX; if (r > S.R) break; const v = Psi[j*G.NR + i]; if (v*Math.sign(psiW) < psiIn*Math.sign(psiW)) psiIn = v; } }
+  for (const f of [0.15, 0.35, 0.55, 0.75, 0.92]) levels.push(psiIn*f);
+  sepInfo = psiIn*Math.sign(psiW) < 0 ? 'oui' : 'non';
+  for (const lv of levels){
+    const closed = lv*Math.sign(psiW) < 0 || lv === 0;
+    const cr = closed ? [1.0, 0.55, 0.23] : [0.31, 0.56, 0.85];
+    const a = closed ? 1 : Math.max(0.25, 1 - Math.abs(lv/psiW)*0.12);
+    for (let j = 0; j < G.NZ - 1; j++) for (let i = 0; i < G.NR - 1; i++){
+      const id = j*G.NR + i, v0 = Psi[id] - lv, v1 = Psi[id + 1] - lv, v2 = Psi[id + G.NR + 1] - lv, v3 = Psi[id + G.NR] - lv;
+      const pts = [];
+      const e = (va, vb, xa, ya, xb, yb) => { if ((va < 0) !== (vb < 0)){ const t = va/(va - vb); pts.push([xa + (xb - xa)*t, ya + (yb - ya)*t]); } };
+      e(v0, v1, i, j, i + 1, j); e(v1, v2, i + 1, j, i + 1, j + 1); e(v2, v3, i + 1, j + 1, i, j + 1); e(v3, v0, i, j + 1, i, j);
+      if (pts.length >= 2){
+        for (let q = 0; q + 1 < pts.length; q += 2){
+          const P = pts.slice(q, q + 2).map(([x, y]) => [(x + 0.5)/G.NR*G.RMAX, G.ZMIN + (y + 0.5)/G.NZ*(G.ZMAX - G.ZMIN)]);
+          if (P[0][1] > G.zFar || P[1][1] > G.zFar) continue;
+          for (const [cx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]){
+            seg.push(P[0][0]*cx, P[0][0]*sy, P[0][1], P[1][0]*cx, P[1][0]*sy, P[1][1]);
+            col.push(cr[0]*a, cr[1]*a, cr[2]*a, cr[0]*a, cr[1]*a, cr[2]*a);
+          }
+        }
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  flLines = new THREE.LineSegments(g, flMat); flLines.visible = document.getElementById('showLines').checked; eng.add(flLines);
+}
+
+// ---------------- particules : poussée de Boris sur GPU ----------------
+const posB = instancedArray(NP, 'vec4'), velB = instancedArray(NP, 'vec4');
+const NA = G.NB + 8;   // compteurs : paroi[0..NB-1], fond, sortie E, sortie pz, plasma, naissances E, naissances, sorties
+const acc = instancedArray(NA, struct({ v: { type: 'int', atomic: true } }));
+const U = { seed: uniform(0), Rw: uniform(1.6), drag: uniform(1), zRing: uniform(G.zRing), aRing: uniform(G.aRing) };
+const K_ = { qmP: SP.p.qm, qmA: SP.a.qm, v0P: SP.p.v0, v0A: SP.a.v0, eP: SP.p.E*10, eA: SP.a.E*10 };   // énergies en unités de 0,1 MeV
+const sampleB = (p) => {
+  const r = length(p.xy).max(1e-4);
+  const b = texture(fieldTex, vec2(r.div(G.RMAX), p.z.sub(G.ZMIN).div(G.ZMAX - G.ZMIN))).level(0);
+  return vec3(b.x.mul(p.x).div(r), b.x.mul(p.y).div(r), b.y);
+};
+// naissance dans le plasma de la FRC, direction isotrope
+const spawn = (p, v, isA, salt) => {
+  const id = float(instanceIndex);
+  const h = (k) => hash(id.mul(1.37).add(U.seed.mul(17.3)).add(salt.mul(3.11)).add(k*7.77));
+  const g1 = sqrt(log(h(1).add(1e-6)).mul(-2)).mul(cos(h(2).mul(6.2831853)));
+  const g2 = sqrt(log(h(3).add(1e-6)).mul(-2)).mul(cos(h(4).mul(6.2831853)));
+  const r = U.aRing.add(g1.mul(0.22)).abs().max(0.02), z = U.zRing.add(g2.mul(0.55)), ph = h(5).mul(6.2831853);
+  p.assign(vec3(r.mul(cos(ph)), r.mul(sin(ph)), z));
+  const ct = h(6).mul(2).sub(1), st = sqrt(ct.mul(ct).oneMinus().max(0)), pv = h(7).mul(6.2831853);
+  v.assign(vec3(st.mul(cos(pv)), st.mul(sin(pv)), ct).mul(mix(K_.v0P, K_.v0A, isA)));
+};
+const initK = Fn(() => {
+  const P = posB.element(instanceIndex), V = velB.element(instanceIndex);
+  const isA = float(instanceIndex.mod(2)), p = vec3(0).toVar(), v = vec3(0).toVar();
+  spawn(p, v, isA, float(0));
+  P.assign(vec4(p, isA)); V.assign(vec4(v, 0));
+})().compute(NP);
+const resetAcc = Fn(() => { atomicStore(acc.element(instanceIndex).get('v'), int(0)); })().compute(NA);
+const stepK = Fn(() => {
+  const P = posB.element(instanceIndex), V = velB.element(instanceIndex);
+  const isA = float(instanceIndex.mod(2)).toVar();
+  const p = P.xyz.toVar(), v = V.xyz.toVar();
+  const qm = mix(K_.qmP, K_.qmA, isA).toVar(), v0 = mix(K_.v0P, K_.v0A, isA).toVar(), e0 = mix(K_.eP, K_.eA, isA).toVar(), mr = mix(1.0, SP.a.m/SP.p.m, isA).toVar();
+  Loop(SUB, ({ i: k }) => {
+    // Boris : rotation exacte autour de B, l'énergie se conserve (hors ralentissement)
+    const t = sampleB(p).mul(qm.mul(DT*0.5)).toVar();
+    const vp = v.add(cross(v, t));
+    v.addAssign(cross(vp, t.mul(2).div(dot(t, t).add(1))));
+    v.mulAssign(U.drag);
+    p.addAssign(v.mul(DT));
+    const rr = length(p.xy), vn = length(v).div(v0), eNow = e0.mul(vn).mul(vn);
+    const lost = int(0).toVar();
+    If(p.z.greaterThan(G.zBack).and(p.z.lessThan(G.zExit)).and(rr.greaterThan(U.Rw)), () => { lost.assign(1); })
+      .ElseIf(p.z.lessThanEqual(G.zBack), () => { lost.assign(2); })
+      .ElseIf(p.z.greaterThan(G.zFar).or(rr.greaterThan(G.rFar)), () => { lost.assign(3); })
+      .ElseIf(vn.lessThan(0.1), () => { lost.assign(4); });
+    If(lost.greaterThan(0), () => {
+      const eI = int(floor(eNow.add(0.5))), e0I = int(floor(e0.add(0.5)));
+      If(lost.equal(1), () => { const bin = clamp(int(floor(p.z.sub(G.zBack).div(G.zExit - G.zBack).mul(G.NB))), int(0), int(G.NB - 1)); atomicAdd(acc.element(bin).get('v'), eI); });
+      If(lost.equal(2), () => { atomicAdd(acc.element(G.NB).get('v'), eI); });
+      If(lost.equal(3), () => {
+        atomicAdd(acc.element(G.NB + 1).get('v'), eI);
+        atomicAdd(acc.element(G.NB + 2).get('v'), int(floor(v.z.div(K_.v0P).mul(mr).mul(100).add(0.5))));
+        atomicAdd(acc.element(G.NB + 6).get('v'), int(1));
+      });
+      atomicAdd(acc.element(G.NB + 3).get('v'), e0I.sub(eI).max(int(0)));
+      atomicAdd(acc.element(G.NB + 4).get('v'), e0I);
+      atomicAdd(acc.element(G.NB + 5).get('v'), int(1));
+      spawn(p, v, isA, float(k).add(1));
+    });
+  });
+  P.assign(vec4(p, isA)); V.assign(vec4(v, length(v).div(v0)));
+})().compute(NP);
+
+const partMat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+partMat.positionNode = posB.toAttribute().xyz;
+partMat.scaleNode = float(0.022);
+partMat.colorNode = Fn(() => {
+  const isA = posB.toAttribute().w, en = velB.toAttribute().w;
+  const d = uv().sub(0.5).length(), disc = clamp(float(0.5).sub(d).mul(4), 0, 1);
+  const c = mix(vec3(0.45, 0.7, 1.4), vec3(1.4, 0.7, 0.25), isA);
+  return c.mul(disc).mul(en.mul(0.7).add(0.3)).mul(0.32);
+})();
+const parts = new THREE.Sprite(partMat); parts.count = NP; parts.frustumCulled = false; parts.renderOrder = 4; eng.add(parts);
+
+// halo du jet (illustratif) le long du tube de flux ouvert juste hors de la séparatrice
+const plumeMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
+const uPlume = uniform(0);
+plumeMat.colorNode = Fn(() => { const n = normalWorld, vv = cameraPosition.sub(positionWorld).normalize(); const f = pow(abs(dot(n, vv)), 1.5); const z = uv().y;
+  return vec3(0.35, 0.55, 1.4).mul(f).mul(uPlume).mul(z.oneMinus().mul(0.8).add(0.2)).mul(0.25); })();
+let plume;
+function buildPlume(S){
+  if (plume){ eng.remove(plume); plume.geometry.dispose(); }
+  // trace d'une ligne de champ depuis le bord extérieur de la séparatrice vers la sortie
+  const psiW = fieldAt(S.R, G.zRing)[2]; let r0 = 0.05;
+  for (let r = 0.05; r < S.R; r += 0.005){ if (Math.sign(fieldAt(r, G.zRing)[2]) === Math.sign(psiW) && fieldAt(r, G.zRing)[2]/psiW > 0.08){ r0 = r; break; } }
+  const pts = []; let r = r0, z = G.zRing;
+  for (let s = 0; s < 4000 && z < G.zFar && r < G.rFar; s++){
+    const [br, bz] = fieldAt(r, z), b = Math.hypot(br, bz) || 1, dir = bz >= 0 ? 1 : -1;
+    r += br/b*0.01*dir; z += bz/b*0.01*dir; if (s % 10 === 0 && z > G.zRing) pts.push(new THREE.Vector2(Math.max(0.02, r), z));
+  }
+  if (pts.length < 4) return;
+  const g = new THREE.LatheGeometry(pts, 48); g.rotateX(Math.PI/2);  // lathe autour de y -> autour de z
+  const uvA = g.attributes.uv, pos = g.attributes.position; for (let i = 0; i < pos.count; i++) uvA.setY(i, (pos.getZ(i) - G.zRing)/(G.zFar - G.zRing));
+  plume = new THREE.Mesh(g, plumeMat); plume.renderOrder = 3; eng.add(plume);
+}
+
+// post-traitement
+const pipeline = new THREE.RenderPipeline(renderer);
+const sp = pass(scene, camera), col = sp.getTextureNode('output');
+pipeline.outputNode = col.add(bloom(col, 0.7, 0.4, 0.2));
+
+// ---------------- interface et diagnostics ----------------
+const ids = ['P', 'B', 'F', 'M', 'N', 'R', 'S', 'X', 'V', 'E'];
+const S = {};
+const fmt = (x, d = 1) => x.toLocaleString('fr-FR', { maximumFractionDigits: d, minimumFractionDigits: d });
+function readUI(){ for (const k of ids) S[k] = +$(k).value;
+  $('vP').textContent = S.P + ' GW'; $('vB').textContent = fmt(S.B) + ' T'; $('vF').textContent = '×' + fmt(S.F, 2); $('vM').textContent = '×' + fmt(S.M, 2);
+  $('vN').textContent = '×' + fmt(S.N, 2); $('vR').textContent = fmt(S.R, 2) + ' m'; $('vS').textContent = S.S + ' traversées'; $('vX').textContent = fmt(S.X);
+  $('vV').textContent = S.V + ' km/s'; $('vE').textContent = Math.round(S.E*100) + ' %';
+  U.Rw.value = S.R; const tau = S.S*(G.zExit - G.zBack)/SP.p.v0; U.drag.value = Math.exp(-DT/tau); }
+let rebuildT = 0, stats = null, frame = 0, lastRead = 0, readBusy = false;
+const EMA = { wall: new Float64Array(G.NB), back: 0, exitE: 0, exitPz: 0, plasma: 0, birthE: 0, births: 0, exits: 0, t: 0 };
+function resetStats(){ EMA.wall.fill(0); for (const k of ['back', 'exitE', 'exitPz', 'plasma', 'birthE', 'births', 'exits', 't']) EMA[k] = 0; renderer.compute(resetAcc); }
+function rebuildAll(){
+  coils = buildCoils(S); computeField(); buildWall(S.R); buildCoilMeshes(); buildFieldLines(S); buildPlume(S);
+  renderer.compute(initK); resetStats(); stats = null;
+}
+for (const k of ids) $(k).addEventListener('input', () => { readUI(); if ('BFMNR'.includes(k)) rebuildT = 0.25; });
+$('showWall').addEventListener('change', (e) => { if (wall) wall.visible = e.target.checked; coilGroup.visible = e.target.checked; });
+$('showLines').addEventListener('change', (e) => { if (flLines) flLines.visible = e.target.checked; });
+$('reset').addEventListener('click', () => { renderer.compute(initK); resetStats(); });
+// matériaux (limites du banc paroi : plaque de 5 mm refroidie à l'eau, propriétés non irradiées)
+const MAT = [['W refroidi eau (recristallisation)', 21.4], ['W + puits CuCrZr (monobloc ITER)', 15.7], ['CFC refroidi eau', 30.3], ['Ta4HfC5 refroidi eau', 19.2], ['Rayonnement seul : meilleur cas (Ta4HfC5)', 14.1]];
+async function readAcc(){
+  readBusy = true;
+  try {
+    const a = new Int32Array(await renderer.getArrayBufferAsync(acc.value));
+    renderer.compute(resetAcc);
+    const tSim = (frame - lastRead)*SUB*DT; lastRead = frame;
+    const k = 0.15;   // moyenne glissante
+    for (let i = 0; i < G.NB; i++) EMA.wall[i] += (a[i]/tSim - EMA.wall[i])*k;
+    const m = (key, val) => { EMA[key] += (val/tSim - EMA[key])*k; };
+    m('back', a[G.NB]); m('exitE', a[G.NB + 1]); m('exitPz', a[G.NB + 2]); m('plasma', a[G.NB + 3]); m('birthE', a[G.NB + 4]); m('births', a[G.NB + 5]); m('exits', a[G.NB + 6]);
+    EMA.t += tSim;
+    updateStats();
+  } catch (e) { console.warn(e); } finally { readBusy = false; }
+}
+function updateStats(){
+  if (EMA.birthE <= 0) return;
+  // D-³He : toute l'énergie de fusion part dans les produits chargés ; le plasma qu'ils chauffent rayonne Pch/X en bremsstrahlung
+  const Pch = S.P*1e9, Pbr = Pch/S.X;
+  const fW = EMA.wall.reduce((s, x) => s + x, 0)/EMA.birthE, fB = EMA.back/EMA.birthE, fE = EMA.exitE/EMA.birthE, fP = EMA.plasma/EMA.birthE;
+  const Lc = G.zExit - G.zBack, Awall = 2*Math.PI*S.R*Lc, dz = Lc/G.NB, aBin = 2*Math.PI*S.R*dz;
+  const qBr = Pbr/Awall;   // bremsstrahlung réparti sur la paroi
+  let qMax = 0, zMax = 0;
+  for (let i = 0; i < G.NB; i++){ const q = (Pch*EMA.wall[i]/EMA.birthE)/aBin + qBr; heatData[i*4] = THREE.DataUtils.toHalfFloat(q/1e6); if (q > qMax){ qMax = q; zMax = G.zBack + (i + 0.5)*dz; } }
+  heatTex.needsUpdate = true;
+  uHeatMax.value += (Math.max(5, qMax/1e6*1.05) - uHeatMax.value)*0.3;
+  // le plasma chauffé évacue sa puissance par le tube de flux ouvert vers la tuyère (hypothèse de TORCH), moins ce qu'il rayonne
+  const Pjet = Math.max(0, Pch*fP - Pbr + Pch*fE), Fjet = 2*S.E*Pjet/(S.V*1e3), mdot = Fjet/(S.V*1e3);
+  // poussée directe des produits qui sortent (sans propergol) : quantité de mouvement réelle par seconde
+  const birthsReal = Pch/(EMA.birthE/EMA.births*0.1*1.602177e-13);   // naissances réelles par seconde
+  const Fdirect = (EMA.exitPz/EMA.births)*PREF*birthsReal;
+  stats = { fW, fB, fE, fP, qMax, zMax, qBr, Fjet, mdot, Fdirect, Pjet };
+  const ok = MAT.map(([n, lim]) => `<span class="${qMax/1e6 <= lim ? 'ok' : 'bad'}">${qMax/1e6 <= lim ? 'tient' : 'dépassé'}</span> ${n} (${fmt(lim)} MW/m²)`).join('<br>');
+  $('stats').innerHTML =
+    `<div class="k">Champ inversé (lignes fermées) : <b>${sepInfo}</b> · Où va la puissance des produits de fusion :</div>` +
+    `plasma (ralentis, puis vers la tuyère) <b>${fmt(fP*100)} %</b> · paroi <b>${fmt(fW*100)} %</b> · fond <b>${fmt(fB*100)} %</b> · sortie directe <b>${fmt(fE*100)} %</b><br>` +
+    `<div class="k" style="margin-top:6px">Paroi de la chambre (${fmt(Awall, 0)} m²) :</div>` +
+    `<span class="big">flux max ${fmt(qMax/1e6)} MW/m²</span> à z = ${fmt(zMax)} m, dont bremsstrahlung ${fmt(qBr/1e6)} MW/m² (échelle de couleur 0 à ${fmt(uHeatMax.value, 0)})<br>${ok}` +
+    `<div class="k" style="margin-top:6px">Poussée (vₑ ${S.V} km/s, rendement ${Math.round(S.E*100)} %) :</div>` +
+    `<span class="big">${Fjet >= 1e6 ? fmt(Fjet/1e6, 2) + ' MN' : fmt(Fjet/1e3, 0) + ' kN'}</span> avec ${fmt(mdot, 1)} kg/s de propergol · puissance du jet ${fmt(Pjet/1e9, 1)} GW<br>` +
+    `<span class="k">Sans propergol, les produits seuls donneraient ${fmt(Fdirect, 0)} N.</span>` +
+    `<div class="k" style="margin-top:6px">Mesure sur ${fmt(EMA.t*1e9, 0)} ns simulées · ${NP.toLocaleString('fr-FR')} particules · ralenti ×${fmt(1/(SUB*DT*60)/1e6, 1)} million</div>`;
+}
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+readUI(); rebuildAll();
+uHeatMax.value = 30;
+let tPrev = performance.now(), first = true;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dtR = (now - tPrev)/1000; tPrev = now;
+  if (rebuildT > 0){ rebuildT -= dtR; if (rebuildT <= 0) rebuildAll(); }
+  U.seed.value = (U.seed.value + 1.618) % 997;
+  renderer.compute(stepK); frame++;
+  if (!readBusy && frame - lastRead >= 12) readAcc();
+  if (stats) uPlume.value += (Math.min(2, stats.Pjet/2e10) - uPlume.value)*Math.min(1, dtR*2);
+  controls.update();
+  pipeline.render();
+  if (first){ first = false; const l = $('loading'); l.style.transition = 'opacity .5s'; l.style.opacity = 0; setTimeout(() => l.remove(), 600); }
+});
+</script>
+</body>
+</html>
