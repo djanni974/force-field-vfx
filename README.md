@@ -8,10 +8,12 @@ Un lance-flammes et un jet de plasma contre un bouclier d'énergie, en temps ré
 - Transition flamme, rentrée atmosphérique, plasma, pilotée par la densité d'énergie (puissance × constriction)
 - Bouclier qui chauffe, se fissure, se perce et se régénère
 - Propane, hydrogène ou napalm, avec vent, pluie, sol brûlé et vitrifié, et onde de choc
-- Son dynamique : effets générés avec ElevenLabs puis pilotés en direct par la simulation
+- Son dynamique : effets générés avec ElevenLabs puis pilotés en direct par la simulation (fichiers dans `sons/`, téléchargés après l'affichage de la scène)
 - Modes Low, Medium, High et Ultra (`?q=low`, `?q=medium`, `?q=high`, `?q=ultra`)
 
 Commandes : ZQSD/WASD pour se déplacer, la souris pour viser, Espace pour tirer, T pour le tir auto, M pour le son.
+
+Sur téléphone : glisser pour orbiter, pincer pour zoomer, toucher pour viser ; le tir automatique et le son se règlent dans le panneau « Réglages ».
 
 Nécessite WebGPU (Chrome, Edge ou Safari récent).
 
