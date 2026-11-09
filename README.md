@@ -8,6 +8,7 @@ Un lance-flammes et un jet de plasma contre un bouclier d'énergie, en temps ré
 - Transition flamme, rentrée atmosphérique, plasma, pilotée par la densité d'énergie (puissance × constriction)
 - Bouclier qui chauffe, se fissure, se perce et se régénère
 - Propane, hydrogène ou napalm, avec vent, pluie, sol brûlé et vitrifié, et onde de choc
+- Décor de crépuscule entièrement procédural : playa craquelée en relief (l'eau stagne dans les fentes sous la pluie), ciel étoilé, lune, brume, et un plan d'ouverture de la caméra
 - Son dynamique : effets générés avec ElevenLabs puis pilotés en direct par la simulation (fichiers dans `sons/`, téléchargés après l'affichage de la scène)
 - Modes Low, Medium, High et Ultra (`?q=low`, `?q=medium`, `?q=high`, `?q=ultra`)
 
